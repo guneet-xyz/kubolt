@@ -18,7 +18,7 @@ import (
 type backupTestApp struct {
 	name      string
 	namespace string
-	pvcs      []string
+	targets   []string
 }
 
 func setupBackupManifest(t *testing.T, apps []backupTestApp) *manifest.Manifest {
@@ -36,14 +36,14 @@ func setupBackupManifest(t *testing.T, apps []backupTestApp) *manifest.Manifest 
 		if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYaml), 0o644); err != nil {
 			t.Fatalf("write Chart.yaml: %v", err)
 		}
-		fmt.Fprintf(&sb, "  - name: %s\n    chartPath: charts/%s\n    namespace: %s\n",
-			a.name, a.name, a.namespace)
-		if len(a.pvcs) > 0 {
-			sb.WriteString("    backup:\n      pvcs:\n")
-			for _, p := range a.pvcs {
-				fmt.Fprintf(&sb, "        - %s\n", p)
-			}
+	fmt.Fprintf(&sb, "  - name: %s\n    chartPath: charts/%s\n    namespace: %s\n",
+		a.name, a.name, a.namespace)
+	if len(a.targets) > 0 {
+		sb.WriteString("    backup:\n      targets:\n")
+		for _, p := range a.targets {
+			fmt.Fprintf(&sb, "        - type: filesystem\n          pvc: %s\n", p)
 		}
+	}
 	}
 	manifestPath := filepath.Join(tmpDir, "kubolt.yaml")
 	if err := os.WriteFile(manifestPath, []byte(sb.String()), 0o644); err != nil {
@@ -94,9 +94,9 @@ func stubBackupExec(rec *backupCallRecorder) {
 
 func TestBackup_NoArgs_PicksAll(t *testing.T) {
 	m := setupBackupManifest(t, []backupTestApp{
-		{name: "a1", namespace: "ns1", pvcs: []string{"pvc-a1"}},
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
 		{name: "a2", namespace: "ns2"},
-		{name: "a3", namespace: "ns3", pvcs: []string{"pvc-a3"}},
+		{name: "a3", namespace: "ns3", targets: []string{"pvc-a3"}},
 	})
 
 	rec := &backupCallRecorder{}
@@ -121,9 +121,9 @@ func TestBackup_NoArgs_PicksAll(t *testing.T) {
 
 func TestBackup_ExplicitApps(t *testing.T) {
 	m := setupBackupManifest(t, []backupTestApp{
-		{name: "a1", namespace: "ns1", pvcs: []string{"pvc-a1"}},
-		{name: "a2", namespace: "ns2", pvcs: []string{"pvc-a2"}},
-		{name: "a3", namespace: "ns3", pvcs: []string{"pvc-a3"}},
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
+		{name: "a2", namespace: "ns2", targets: []string{"pvc-a2"}},
+		{name: "a3", namespace: "ns3", targets: []string{"pvc-a3"}},
 	})
 
 	rec := &backupCallRecorder{}
@@ -145,7 +145,7 @@ func TestBackup_ExplicitApps(t *testing.T) {
 
 func TestBackup_InvalidAppName(t *testing.T) {
 	m := setupBackupManifest(t, []backupTestApp{
-		{name: "a1", namespace: "ns1", pvcs: []string{"pvc-a1"}},
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
 	})
 
 	rec := &backupCallRecorder{}
@@ -166,7 +166,7 @@ func TestBackup_InvalidAppName(t *testing.T) {
 
 func TestBackup_AppWithoutBackupSpec(t *testing.T) {
 	m := setupBackupManifest(t, []backupTestApp{
-		{name: "a1", namespace: "ns1", pvcs: []string{"pvc-a1"}},
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
 		{name: "a2", namespace: "ns2"},
 	})
 
@@ -208,7 +208,7 @@ func TestBackup_SSHHostUnset(t *testing.T) {
 
 func TestBackup_DryRun(t *testing.T) {
 	m := setupBackupManifest(t, []backupTestApp{
-		{name: "a1", namespace: "ns1", pvcs: []string{"pvc-a1"}},
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
 	})
 
 	rec := &backupCallRecorder{}

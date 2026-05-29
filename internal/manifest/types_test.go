@@ -65,12 +65,18 @@ func TestRoundTrip(t *testing.T) {
 			t.Errorf("app[%d].Backup nil mismatch", i)
 		}
 		if app1.Backup != nil && app2.Backup != nil {
-			if len(app1.Backup.PVCs) != len(app2.Backup.PVCs) {
-				t.Errorf("app[%d].Backup.PVCs length mismatch: %d vs %d", i, len(app1.Backup.PVCs), len(app2.Backup.PVCs))
+			if len(app1.Backup.Targets) != len(app2.Backup.Targets) {
+				t.Errorf("app[%d].Backup.Targets length mismatch: %d vs %d", i, len(app1.Backup.Targets), len(app2.Backup.Targets))
 			}
-			for j, pvc := range app1.Backup.PVCs {
-				if pvc != app2.Backup.PVCs[j] {
-					t.Errorf("app[%d].Backup.PVCs[%d] mismatch: %q vs %q", i, j, pvc, app2.Backup.PVCs[j])
+			for j, target := range app1.Backup.Targets {
+				if target.Type != app2.Backup.Targets[j].Type {
+					t.Errorf("app[%d].Backup.Targets[%d].Type mismatch: %q vs %q", i, j, target.Type, app2.Backup.Targets[j].Type)
+				}
+				if target.PVC != app2.Backup.Targets[j].PVC {
+					t.Errorf("app[%d].Backup.Targets[%d].PVC mismatch: %q vs %q", i, j, target.PVC, app2.Backup.Targets[j].PVC)
+				}
+				if target.PodSelector != app2.Backup.Targets[j].PodSelector {
+					t.Errorf("app[%d].Backup.Targets[%d].PodSelector mismatch: %q vs %q", i, j, target.PodSelector, app2.Backup.Targets[j].PodSelector)
 				}
 			}
 			if (app1.Backup.ScaleDeployments == nil) != (app2.Backup.ScaleDeployments == nil) {
@@ -98,5 +104,53 @@ apps: []
 	err := decoder.Decode(&m)
 	if err == nil {
 		t.Error("expected error for unknown field 'cluster', but got nil")
+	}
+}
+
+func TestTargetZeroValue(t *testing.T) {
+	target := Target{}
+	if target.Type != "" {
+		t.Errorf("expected zero-value Type to be empty string, got %q", target.Type)
+	}
+	if target.PVC != "" {
+		t.Errorf("expected zero-value PVC to be empty string, got %q", target.PVC)
+	}
+	if target.PodSelector != "" {
+		t.Errorf("expected zero-value PodSelector to be empty string, got %q", target.PodSelector)
+	}
+}
+
+func TestBackupSpecWithTargets(t *testing.T) {
+	spec := BackupSpec{
+		Targets: []Target{
+			{
+				Type:        TargetFilesystem,
+				PVC:         "data-pvc",
+				PodSelector: "",
+			},
+			{
+				Type:        TargetPgDump,
+				PVC:         "",
+				PodSelector: "app=postgres",
+			},
+		},
+	}
+
+	if len(spec.Targets) != 2 {
+		t.Errorf("expected 2 targets, got %d", len(spec.Targets))
+	}
+
+	if spec.Targets[0].Type != TargetFilesystem {
+		t.Errorf("expected first target type to be %q, got %q", TargetFilesystem, spec.Targets[0].Type)
+	}
+	if spec.Targets[0].PVC != "data-pvc" {
+		t.Errorf("expected first target PVC to be %q, got %q", "data-pvc", spec.Targets[0].PVC)
+	}
+
+	if spec.Targets[1].Type != TargetPgDump {
+		t.Errorf("expected second target type to be %q, got %q", TargetPgDump, spec.Targets[1].Type)
+	}
+	if spec.Targets[1].PodSelector != "app=postgres" {
+		t.Errorf("expected second target PodSelector to be %q, got %q", "app=postgres", spec.Targets[1].PodSelector)
 	}
 }

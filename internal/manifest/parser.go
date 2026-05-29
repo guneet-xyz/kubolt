@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/guneet-xyz/kubolt/internal/depgraph"
 	"gopkg.in/yaml.v3"
@@ -26,6 +27,11 @@ func Load(path string) (*Manifest, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(&m); err != nil {
+		// Check if it's a legacy pvcs field error and make it actionable
+		errStr := err.Error()
+		if strings.Contains(errStr, "pvcs") {
+			return nil, fmt.Errorf("parsing manifest: backup.pvcs is no longer supported; use backup.targets: [{type: filesystem, pvc: <name>}] or [{type: pg_dump, podSelector: <selector>}]: %w", err)
+		}
 		return nil, fmt.Errorf("parsing manifest: %w", err)
 	}
 
@@ -96,8 +102,30 @@ func (m *Manifest) Validate() error {
 	}
 
 	for _, app := range m.Apps {
-		if app.Backup != nil && len(app.Backup.PVCs) == 0 {
-			return fmt.Errorf("app %q backup.pvcs is empty", app.Name)
+		if app.Backup != nil {
+			if len(app.Backup.Targets) == 0 {
+				return fmt.Errorf("app %q: backup.targets must be non-empty", app.Name)
+			}
+			for i, t := range app.Backup.Targets {
+				switch t.Type {
+				case TargetFilesystem:
+					if t.PVC == "" {
+						return fmt.Errorf("app %q: backup.targets[%d]: type filesystem requires pvc", app.Name, i)
+					}
+					if t.PodSelector != "" {
+						return fmt.Errorf("app %q: backup.targets[%d]: type filesystem must not set podSelector", app.Name, i)
+					}
+				case TargetPgDump:
+					if t.PodSelector == "" {
+						return fmt.Errorf("app %q: backup.targets[%d]: type pg_dump requires podSelector", app.Name, i)
+					}
+					if t.PVC != "" {
+						return fmt.Errorf("app %q: backup.targets[%d]: type pg_dump must not set pvc", app.Name, i)
+					}
+				default:
+					return fmt.Errorf("app %q: backup.targets[%d]: unknown type %q (must be filesystem or pg_dump)", app.Name, i, t.Type)
+				}
+			}
 		}
 	}
 

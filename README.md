@@ -65,9 +65,13 @@ apps:
     dependsOn:
       - caddy
     backup:
-      pvcs:
-        - walls-data
-        - walls-cache
+      targets:
+        - type: filesystem
+          pvc: walls-data
+        - type: filesystem
+          pvc: walls-cache
+        - type: pg_dump
+          podSelector: "app=walls-postgres"
       scaleDeployments: true
 ```
 
@@ -82,8 +86,25 @@ apps:
 | `apps[].chartPath` | string | yes | Path to the chart directory, relative to the manifest file. |
 | `apps[].dependsOn` | list of strings | no | Names of other apps that must be installed first. |
 | `apps[].backup` | object | no | Backup configuration. Omit for apps with no persistent state. |
-| `apps[].backup.pvcs` | list of strings | yes when `backup` is set | PVC names to back up. |
+| `apps[].backup.targets` | list of objects | yes when `backup` is set | One or more backup targets. Each target has a `type` and type-specific fields. |
+| `apps[].backup.targets[].type` | string | yes | `filesystem` — SSH+tar of a PVC. `pg_dump` — `kubectl exec pg_dump -Fc` inside a pod. |
+| `apps[].backup.targets[].pvc` | string | required when `type: filesystem` | Name of the PVC to archive. |
+| `apps[].backup.targets[].podSelector` | string | required when `type: pg_dump` | Label selector (e.g. `app=postgres`) to find the single running pod to exec into. |
 | `apps[].backup.scaleDeployments` | bool | no | Scale deployments in the namespace to 0 during backup. Defaults to `true`. |
+
+> **Migrating from `pvcs:`** — The old `backup.pvcs:` field has been removed. Replace:
+> ```yaml
+> backup:
+>   pvcs:
+>     - my-pvc
+> ```
+> with:
+> ```yaml
+> backup:
+>   targets:
+>     - type: filesystem
+>       pvc: my-pvc
+> ```
 
 ## Commands
 
@@ -106,9 +127,14 @@ Runs `helm uninstall` for the target app. PVCs are never deleted. If any app tha
 
 ### `backup [app ...]`
 
-Backs up PVCs declared under `apps[].backup`. For each target app, kubolt scales its deployments to `0` (when `scaleDeployments` is true), streams the volume contents over SSH using `tar`, then restores the replica counts. The restore step also runs on `SIGINT` and `SIGTERM`, so an interrupted backup never leaves workloads scaled down.
+Backs up targets declared under `apps[].backup.targets`. Two strategies are supported:
 
-With no positional args, every app that has a `backup` block is processed.
+- **`filesystem`**: scales the app's deployments to `0` (when `scaleDeployments` is true), streams the PVC contents over SSH using `tar`, copies the archive locally with `scp`, then restores replica counts. The scale-up also runs on `SIGINT`/`SIGTERM`.
+- **`pg_dump`**: runs `kubectl exec <pod> -- pg_dump -Fc <db>` and streams the output to `<dir>/<timestamp>/<app>-<dbname>.dump`. No SSH, no scale-down. The database name is auto-detected from the pod's environment (`PGDATABASE`, `POSTGRES_DB`, `POSTGRESQL_DATABASE`, first non-empty wins).
+
+With no positional args, every app with a `backup` block is processed.
+
+Preflight checks: `kubectl` is always required. `ssh`, `scp`, and `tar` are only checked when at least one `filesystem` target is selected.
 
 - Flags:
   - `--dir <path>`: destination directory for archives (default `./backups`).

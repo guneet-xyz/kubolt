@@ -25,17 +25,6 @@ func init() {
 }
 
 func runBackup(cmd *cobra.Command, args []string) error {
-	if err := preflight.RequireBinaries("kubectl", "ssh", "scp", "tar"); err != nil {
-		return err
-	}
-	host, err := preflight.RequireSSHHost()
-	if err != nil {
-		return err
-	}
-	if err := preflight.RequirePasswordlessSSH(host); err != nil {
-		return err
-	}
-
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	cwd, err := os.Getwd()
@@ -47,15 +36,41 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading manifest: %w", err)
 	}
 
-	return runBackupCore(m, args, backupDir, host, dryRun)
+	// Select apps first so we can determine which binaries are needed.
+	selected, err := selectApps(m, args)
+	if err != nil {
+		return err
+	}
+
+	// kubectl is always required.
+	if err := preflight.RequireBinaries("kubectl"); err != nil {
+		return err
+	}
+
+	// ssh/scp/tar only needed when at least one filesystem target is present.
+	if anyFilesystemTarget(selected) {
+		if err := preflight.RequireBinaries("ssh", "scp", "tar"); err != nil {
+			return err
+		}
+		host, err := preflight.RequireSSHHost()
+		if err != nil {
+			return err
+		}
+		if err := preflight.RequirePasswordlessSSH(host); err != nil {
+			return err
+		}
+		return runBackupWithHost(selected, backupDir, host, dryRun)
+	}
+
+	return runBackupWithHost(selected, backupDir, "", dryRun)
 }
 
-// runBackupCore is the testable core: selects apps, validates, runs BackupApps.
+// selectApps selects apps based on provided names or all apps with backup specs.
 // Selection rules:
 //   - No app names provided: pick every app with a non-nil Backup spec.
 //   - Names provided: each name must resolve to an app AND that app must have
 //     a Backup spec. Otherwise an error is returned before any execution.
-func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string, dryRun bool) error {
+func selectApps(m *manifest.Manifest, appNames []string) ([]manifest.App, error) {
 	var selected []manifest.App
 
 	if len(appNames) == 0 {
@@ -68,15 +83,35 @@ func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string,
 		for _, name := range appNames {
 			app, ok := m.AppByName(name)
 			if !ok {
-				return fmt.Errorf("unknown app: %q", name)
+				return nil, fmt.Errorf("unknown app: %q", name)
 			}
 			if app.Backup == nil {
-				return fmt.Errorf("app %q has no backup configuration", name)
+				return nil, fmt.Errorf("app %q has no backup configuration", name)
 			}
 			selected = append(selected, *app)
 		}
 	}
 
+	return selected, nil
+}
+
+// anyFilesystemTarget reports whether any selected app has a filesystem backup target.
+func anyFilesystemTarget(apps []manifest.App) bool {
+	for _, app := range apps {
+		if app.Backup == nil {
+			continue
+		}
+		for _, t := range app.Backup.Targets {
+			if t.Type == manifest.TargetFilesystem {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runBackupWithHost creates a Backuper and runs BackupApps.
+func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool) error {
 	b := &backup.Backuper{
 		SSHHost:   sshHost,
 		RemoteTmp: "/tmp/kubolt-backups",
@@ -85,4 +120,18 @@ func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string,
 		Stderr:    Stderr,
 	}
 	return b.BackupApps(selected, dir)
+}
+
+// runBackupCore is the testable core: selects apps, validates, runs BackupApps.
+// Kept for backward compatibility with tests.
+// Selection rules:
+//   - No app names provided: pick every app with a non-nil Backup spec.
+//   - Names provided: each name must resolve to an app AND that app must have
+//     a Backup spec. Otherwise an error is returned before any execution.
+func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string, dryRun bool) error {
+	selected, err := selectApps(m, appNames)
+	if err != nil {
+		return err
+	}
+	return runBackupWithHost(selected, dir, sshHost, dryRun)
 }

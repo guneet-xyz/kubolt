@@ -23,7 +23,7 @@ func SetExecCommand(fn func(string, ...string) *exec.Cmd) { execCommand = fn }
 // ResetExecCommand restores the default exec.Command.
 func ResetExecCommand() { execCommand = exec.Command }
 
-// Backuper orchestrates PVC backups via ssh/scp/kubectl.
+// Backuper orchestrates per-target backups via ssh/scp/kubectl.
 type Backuper struct {
 	SSHHost   string
 	RemoteTmp string
@@ -36,7 +36,8 @@ type Backuper struct {
 	nowFn func() time.Time
 }
 
-// BackupApps backs up PVCs for the given apps into localDir/<timestamp>/.
+// BackupApps backs up all configured targets for the given apps into
+// localDir/<timestamp>/. Dispatches each target to its registered Strategy.
 func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 	now := b.nowFn
 	if now == nil {
@@ -46,32 +47,65 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 	localTs := fmt.Sprintf("%s/%s", localDir, ts)
 	remoteTsDir := fmt.Sprintf("%s/%s", b.RemoteTmp, ts)
 
+	// Determine if any app has filesystem targets (needs SSH staging).
+	needsRemote := false
+	for _, app := range apps {
+		if app.Backup == nil {
+			continue
+		}
+		for _, t := range app.Backup.Targets {
+			if t.Type == manifest.TargetFilesystem {
+				needsRemote = true
+				break
+			}
+		}
+		if needsRemote {
+			break
+		}
+	}
+
+	// Dry-run: print plans for all targets across all apps.
 	if b.DryRun {
 		fmt.Fprintf(b.Stdout, "[dry-run] mkdir -p %s\n", localTs)
-		fmt.Fprintf(b.Stdout, "[dry-run] ssh %s mkdir -p %s\n", b.SSHHost, remoteTsDir)
+		if needsRemote {
+			fmt.Fprintf(b.Stdout, "[dry-run] ssh %s mkdir -p %s\n", b.SSHHost, remoteTsDir)
+		}
 		for _, app := range apps {
 			if app.Backup == nil {
 				continue
 			}
-			for _, pvc := range app.Backup.PVCs {
-				fmt.Fprintf(b.Stdout, "[dry-run] ssh %s tar czf %s/%s.tar.gz ...\n", b.SSHHost, remoteTsDir, pvc)
+			for _, target := range app.Backup.Targets {
+				strat, err := b.resolveStrategy(target.Type)
+				if err != nil {
+					return err
+				}
+				if fs, ok := strat.(*filesystemStrategy); ok {
+					fs.setRemoteTsDir(remoteTsDir)
+				}
+				if err := strat.Backup(context.Background(), app, target, localTs); err != nil {
+					return err
+				}
 			}
 		}
-		fmt.Fprintf(b.Stdout, "[dry-run] scp -r %s:%s/* %s/\n", b.SSHHost, remoteTsDir, localTs)
+		if needsRemote {
+			fmt.Fprintf(b.Stdout, "[dry-run] scp -r %s:%s/* %s/\n", b.SSHHost, remoteTsDir, localTs)
+		}
 		return nil
 	}
 
-	// Create local timestamp dir
+	// Create local timestamp dir.
 	if err := os.MkdirAll(localTs, 0755); err != nil {
 		return fmt.Errorf("creating local dir: %w", err)
 	}
 
-	// Create remote timestamp dir
-	if err := b.runSSH(fmt.Sprintf("mkdir -p %s", remoteTsDir)); err != nil {
-		return fmt.Errorf("creating remote dir: %w", err)
+	// Create remote staging dir only if needed.
+	if needsRemote {
+		if err := b.runSSH(fmt.Sprintf("mkdir -p %s", remoteTsDir)); err != nil {
+			return fmt.Errorf("creating remote dir: %w", err)
+		}
 	}
 
-	// Signal handler for cleanup
+	// Signal handler for cleanup.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
@@ -85,63 +119,65 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 		}
 	}()
 
+	// Per-app loop.
 	for _, app := range apps {
 		if app.Backup == nil {
 			continue
 		}
-		if err := b.backupApp(ctx, app, remoteTsDir); err != nil {
+		if err := b.backupAppTargets(ctx, app, localTs, remoteTsDir); err != nil {
 			return err
 		}
 	}
 
-	// SCP from remote to local
-	scpSrc := fmt.Sprintf("%s:%s/", b.SSHHost, remoteTsDir)
-	if err := b.runCmd("scp", "-r", scpSrc, localTs+"/"); err != nil {
-		return fmt.Errorf("scp from remote: %w", err)
-	}
-
-	// Cleanup remote
-	if err := b.runSSH(fmt.Sprintf("rm -rf %s", remoteTsDir)); err != nil {
-		fmt.Fprintf(b.Stderr, "warning: failed to clean remote tmp: %v\n", err)
+	// SCP all filesystem outputs back and clean remote.
+	if needsRemote {
+		scpSrc := fmt.Sprintf("%s:%s/", b.SSHHost, remoteTsDir)
+		if err := b.runCmd("scp", "-r", scpSrc, localTs+"/"); err != nil {
+			return fmt.Errorf("scp from remote: %w", err)
+		}
+		if err := b.runSSH(fmt.Sprintf("rm -rf %s", remoteTsDir)); err != nil {
+			fmt.Fprintf(b.Stderr, "warning: failed to clean remote tmp: %v\n", err)
+		}
 	}
 
 	fmt.Fprintf(b.Stdout, "==> Backup complete: %s\n", localTs)
 	return nil
 }
 
-func (b *Backuper) backupApp(ctx context.Context, app manifest.App, remoteTsDir string) error {
-	scaleDown := app.Backup.ScaleDeployments == nil || *app.Backup.ScaleDeployments
+// backupAppTargets handles scale-down (if needed) and runs each target.
+func (b *Backuper) backupAppTargets(ctx context.Context, app manifest.App, localTs, remoteTsDir string) error {
+	// Determine if this app has any filesystem targets → scale-down is needed.
+	hasFilesystem := false
+	for _, t := range app.Backup.Targets {
+		if t.Type == manifest.TargetFilesystem {
+			hasFilesystem = true
+			break
+		}
+	}
 
-	// Save replica counts and scale down
+	scaleDown := hasFilesystem && (app.Backup.ScaleDeployments == nil || *app.Backup.ScaleDeployments)
+
 	replicas := map[string]string{}
 	if scaleDown {
-		// Get deployments
-		out, err := b.captureCmd("kubectl", "get", "deploy", "-n", app.Namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}={.spec.replicas} {end}")
+		out, err := b.captureCmd("kubectl", "get", "deploy", "-n", app.Namespace, "-o",
+			"jsonpath={range .items[*]}{.metadata.name}={.spec.replicas} {end}")
 		if err != nil {
 			return fmt.Errorf("listing deployments for %s: %w", app.Name, err)
 		}
-		// Parse "name=N name2=N2 ..."
 		for _, part := range strings.Fields(string(out)) {
 			kv := strings.SplitN(part, "=", 2)
 			if len(kv) == 2 {
 				replicas[kv[0]] = kv[1]
 			}
 		}
-
-		// Scale each to 0 (sorted for deterministic order)
-		names := sortedKeys(replicas)
-		for _, name := range names {
+		for _, name := range sortedKeys(replicas) {
 			if err := b.runCmd("kubectl", "scale", "deploy", name, "-n", app.Namespace, "--replicas=0"); err != nil {
 				return fmt.Errorf("scaling down %s/%s: %w", app.Namespace, name, err)
 			}
 		}
-
-		// Wait for pods to delete
 		if err := b.runCmd("kubectl", "wait", "--for=delete", "pod", "--all", "-n", app.Namespace, "--timeout=120s"); err != nil {
 			return fmt.Errorf("scale-down timeout for %s: %w", app.Name, err)
 		}
-
-		// Defer restore replicas
 		defer func() {
 			for _, name := range sortedKeys(replicas) {
 				count := replicas[name]
@@ -150,30 +186,26 @@ func (b *Backuper) backupApp(ctx context.Context, app manifest.App, remoteTsDir 
 		}()
 	}
 
-	// Check for context cancellation (SIGINT)
+	// Check for cancellation after scale-down, before backup work.
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("backup cancelled (signal received)")
 	default:
 	}
 
-	// Tar each PVC
-	for _, pvc := range app.Backup.PVCs {
-		// Get PV host path
-		pvName, err := b.captureCmd("kubectl", "get", "pvc", pvc, "-n", app.Namespace, "-o", "jsonpath={.spec.volumeName}")
+	// Run each target.
+	for _, target := range app.Backup.Targets {
+		strat, err := b.resolveStrategy(target.Type)
 		if err != nil {
-			return fmt.Errorf("getting PV name for pvc %s: %w", pvc, err)
+			return err
 		}
-		hostPath, err := b.captureCmd("kubectl", "get", "pv", strings.TrimSpace(string(pvName)), "-o", "jsonpath={.spec.local.path}")
-		if err != nil {
-			return fmt.Errorf("getting host path for pv %s: %w", string(pvName), err)
+		if fs, ok := strat.(*filesystemStrategy); ok {
+			fs.setRemoteTsDir(remoteTsDir)
 		}
-		tarDest := fmt.Sprintf("%s/%s.tar.gz", remoteTsDir, pvc)
-		if err := b.runSSH(fmt.Sprintf("tar czf %s -C %s .", tarDest, strings.TrimSpace(string(hostPath)))); err != nil {
-			return fmt.Errorf("tar for pvc %s: %w", pvc, err)
+		if err := strat.Backup(ctx, app, target, localTs); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 

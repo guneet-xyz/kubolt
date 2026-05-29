@@ -9,6 +9,7 @@ apps:
     dependsOn:
       - caddy
     backup:
-      pvcs:
-        - walls-postgres-data
+      targets:
+        - type: filesystem
+          pvc: walls-postgres-data
       scaleDeployments: true

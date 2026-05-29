@@ -1,0 +1,9 @@
+apiVersion: kubolt.io/v1
+apps:
+  - name: walls
+    chartPath: ./apps/walls
+    namespace: walls
+    backup:
+      pvcs:
+        - walls-data
+      scaleDeployments: true

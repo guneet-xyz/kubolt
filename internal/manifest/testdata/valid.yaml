@@ -13,5 +13,6 @@ apps:
       - caddy
       - registry
     backup:
-      pvcs:
-        - walls-postgres-data
+      targets:
+        - type: filesystem
+          pvc: walls-postgres-data

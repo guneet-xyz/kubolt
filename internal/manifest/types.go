@@ -19,8 +19,24 @@ type App struct {
 	Backup    *BackupSpec `yaml:"backup,omitempty"`
 }
 
+// TargetType is the type of backup target.
+type TargetType string
+
+// Target backup types.
+const (
+	TargetFilesystem TargetType = "filesystem"
+	TargetPgDump     TargetType = "pg_dump"
+)
+
+// Target describes a single backup target.
+type Target struct {
+	Type        TargetType `yaml:"type"`
+	PVC         string     `yaml:"pvc,omitempty"`
+	PodSelector string     `yaml:"podSelector,omitempty"`
+}
+
 // BackupSpec describes how to back up an app's persistent data.
 type BackupSpec struct {
-	PVCs             []string `yaml:"pvcs"`
+	Targets          []Target `yaml:"targets"`
 	ScaleDeployments *bool    `yaml:"scaleDeployments,omitempty"` // default true, applied by parser
 }

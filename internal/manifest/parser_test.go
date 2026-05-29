@@ -58,6 +58,9 @@ func TestLoad_Valid(t *testing.T) {
 	if walls.Backup == nil {
 		t.Fatal("walls.Backup nil")
 	}
+	if len(walls.Backup.Targets) == 0 {
+		t.Fatal("walls.Backup.Targets empty")
+	}
 	if walls.Backup.ScaleDeployments == nil || *walls.Backup.ScaleDeployments != true {
 		t.Errorf("ScaleDeployments default = %v, want *true", walls.Backup.ScaleDeployments)
 	}
@@ -161,7 +164,10 @@ func TestApplyDefaults_RespectsExplicitFalse(t *testing.T) {
 			Name:      "x",
 			ChartPath: "x",
 			Namespace: "x",
-			Backup:    &BackupSpec{PVCs: []string{"p"}, ScaleDeployments: &f},
+			Backup: &BackupSpec{
+				Targets:          []Target{{Type: TargetFilesystem, PVC: "p"}},
+				ScaleDeployments: &f,
+			},
 		}},
 	}
 	m.ApplyDefaults()
@@ -192,19 +198,19 @@ func TestValidate_EmptyNamespace(t *testing.T) {
 	}
 }
 
-func TestValidate_EmptyBackupPVCs(t *testing.T) {
+func TestValidate_EmptyBackupTargets(t *testing.T) {
 	dir := t.TempDir()
 	writeChartYamls(t, dir, "x")
 	m := &Manifest{
 		APIVersion: SupportedAPIVersion,
 		Apps: []App{{
 			Name: "a", ChartPath: "x", Namespace: "a",
-			Backup: &BackupSpec{PVCs: nil},
+			Backup: &BackupSpec{Targets: []Target{}},
 		}},
 		dir: dir,
 	}
 	err := m.Validate()
-	if err == nil || !strings.Contains(err.Error(), "pvcs") {
+	if err == nil || !strings.Contains(err.Error(), "targets") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -281,3 +287,89 @@ func TestAppByName(t *testing.T) {
 		t.Error("expected !ok for nope")
 	}
 }
+
+func TestLoad_BackupValidation(t *testing.T) {
+	cases := []struct {
+		name      string
+		fixture   string
+		charts    []string
+		errSubstr string
+	}{
+		{
+			name:      "valid_mixed_targets",
+			fixture:   "valid_mixed_targets.yaml",
+			charts:    []string{"apps/walls"},
+			errSubstr: "",
+		},
+		{
+			name:      "legacy_pvcs_rejected",
+			fixture:   "legacy_pvcs.yaml",
+			charts:    []string{"apps/walls"},
+			errSubstr: "pvcs",
+		},
+		{
+			name:      "legacy_pvcs_mentions_targets",
+			fixture:   "legacy_pvcs.yaml",
+			charts:    []string{"apps/walls"},
+			errSubstr: "targets",
+		},
+		{
+			name:      "pgdump_no_selector",
+			fixture:   "pgdump_no_selector.yaml",
+			charts:    []string{"apps/walls"},
+			errSubstr: "podSelector",
+		},
+		{
+			name:      "filesystem_no_pvc",
+			fixture:   "filesystem_no_pvc.yaml",
+			charts:    []string{"apps/walls"},
+			errSubstr: "pvc",
+		},
+		{
+			name:      "empty_targets",
+			fixture:   "",
+			charts:    []string{"apps/walls"},
+			errSubstr: "targets",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var path string
+			if tc.fixture != "" {
+				path = stageManifest(t, tc.fixture, tc.charts...)
+			} else {
+				dir := t.TempDir()
+				writeChartYamls(t, dir, tc.charts...)
+				manifestYAML := `apiVersion: kubolt.io/v1
+apps:
+  - name: walls
+    chartPath: ./apps/walls
+    namespace: walls
+    backup:
+      targets: []
+`
+				dst := filepath.Join(dir, "kubolt.yaml")
+				if err := os.WriteFile(dst, []byte(manifestYAML), 0o644); err != nil {
+					t.Fatalf("write manifest: %v", err)
+				}
+				path = dst
+			}
+
+			_, err := Load(path)
+			if tc.errSubstr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("error %q missing %q", err, tc.errSubstr)
+				}
+			}
+		})
+	}
+}
+

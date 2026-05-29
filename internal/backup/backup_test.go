@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -52,12 +53,15 @@ func (s *stubRecorder) getCalls() []string {
 }
 
 func (s *stubRecorder) lookup(full string) stubResponse {
+	var best string
+	var bestResp stubResponse
 	for prefix, resp := range s.matchers {
-		if strings.HasPrefix(full, prefix) {
-			return resp
+		if strings.HasPrefix(full, prefix) && len(prefix) > len(best) {
+			best = prefix
+			bestResp = resp
 		}
 	}
-	return stubResponse{}
+	return bestResp
 }
 
 func (s *stubRecorder) execFn() func(string, ...string) *exec.Cmd {
@@ -107,6 +111,14 @@ func newBackuper(stdout, stderr *bytes.Buffer) *Backuper {
 	}
 }
 
+func fsTarget(pvc string) manifest.Target {
+	return manifest.Target{Type: manifest.TargetFilesystem, PVC: pvc}
+}
+
+func pgTarget(selector string) manifest.Target {
+	return manifest.Target{Type: manifest.TargetPgDump, PodSelector: selector}
+}
+
 func TestBackup_HappyPath(t *testing.T) {
 	stub := newStub()
 	stub.setOutput("kubectl get deploy", "web=2 ")
@@ -123,7 +135,10 @@ func TestBackup_HappyPath(t *testing.T) {
 	apps := []manifest.App{{
 		Name:      "caddy",
 		Namespace: "caddy",
-		Backup:    &manifest.BackupSpec{PVCs: []string{"caddy-data"}, ScaleDeployments: boolPtr(true)},
+		Backup: &manifest.BackupSpec{
+			Targets:          []manifest.Target{fsTarget("caddy-data")},
+			ScaleDeployments: boolPtr(true),
+		},
 	}}
 
 	if err := b.BackupApps(apps, dir); err != nil {
@@ -177,7 +192,9 @@ func TestBackup_TarFailure_RestoresReplicas(t *testing.T) {
 	apps := []manifest.App{{
 		Name:      "app",
 		Namespace: "app",
-		Backup:    &manifest.BackupSpec{PVCs: []string{"data"}},
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{fsTarget("data")},
+		},
 	}}
 
 	err := b.BackupApps(apps, dir)
@@ -222,10 +239,13 @@ func TestBackup_SIGINT_TriggersRestore(t *testing.T) {
 	app := manifest.App{
 		Name:      "app",
 		Namespace: "app",
-		Backup:    &manifest.BackupSpec{PVCs: []string{"data"}, ScaleDeployments: boolPtr(true)},
+		Backup: &manifest.BackupSpec{
+			Targets:          []manifest.Target{fsTarget("data")},
+			ScaleDeployments: boolPtr(true),
+		},
 	}
 
-	err := b.backupApp(cancelledCtx, app, "/tmp/k3s-backups/ts")
+	err := b.backupAppTargets(cancelledCtx, app, "/tmp/local/ts", "/tmp/k3s-backups/ts")
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("expected cancellation error, got: %v", err)
 	}
@@ -257,7 +277,10 @@ func TestBackup_ScaleDeploymentsFalse(t *testing.T) {
 	apps := []manifest.App{{
 		Name:      "app",
 		Namespace: "app",
-		Backup:    &manifest.BackupSpec{PVCs: []string{"data"}, ScaleDeployments: boolPtr(false)},
+		Backup: &manifest.BackupSpec{
+			Targets:          []manifest.Target{fsTarget("data")},
+			ScaleDeployments: boolPtr(false),
+		},
 	}}
 
 	if err := b.BackupApps(apps, dir); err != nil {
@@ -325,7 +348,9 @@ func TestBackup_DryRun(t *testing.T) {
 	apps := []manifest.App{{
 		Name:      "caddy",
 		Namespace: "caddy",
-		Backup:    &manifest.BackupSpec{PVCs: []string{"caddy-data"}},
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{fsTarget("caddy-data")},
+		},
 	}}
 
 	if err := b.BackupApps(apps, t.TempDir()); err != nil {
@@ -343,5 +368,134 @@ func TestBackup_DryRun(t *testing.T) {
 	}
 	if !strings.Contains(out, "scp -r pax:") {
 		t.Errorf("expected scp line in dry-run output, got: %q", out)
+	}
+}
+
+func TestBackup_PgDumpOnly_NoSSH(t *testing.T) {
+	stub := newStub()
+	stub.setOutput("kubectl get pod -n db", "postgres-0 ")
+	stub.setOutput("kubectl exec -n db postgres-0 -- printenv PGDATABASE", "mydb")
+	stub.setOutput("kubectl exec -n db postgres-0 -- pg_dump", "DUMPBYTES")
+
+	SetExecCommand(stub.execFn())
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	b := newBackuper(&stdout, &stderr)
+	dir := t.TempDir()
+
+	apps := []manifest.App{{
+		Name:      "pg",
+		Namespace: "db",
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{pgTarget("app=postgres")},
+		},
+	}}
+
+	if err := b.BackupApps(apps, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := stub.getCalls()
+	pgDumpCalled := false
+	for _, c := range calls {
+		if strings.HasPrefix(c, "ssh ") {
+			t.Errorf("no ssh calls expected for pg_dump-only backup: %s", c)
+		}
+		if strings.HasPrefix(c, "scp ") {
+			t.Errorf("no scp calls expected for pg_dump-only backup: %s", c)
+		}
+		if strings.HasPrefix(c, "kubectl scale") {
+			t.Errorf("no scale calls expected for pg_dump-only backup: %s", c)
+		}
+		if strings.HasPrefix(c, "kubectl wait") {
+			t.Errorf("no wait calls expected for pg_dump-only backup: %s", c)
+		}
+		if strings.HasPrefix(c, "kubectl exec -n db postgres-0 -- pg_dump") {
+			pgDumpCalled = true
+		}
+	}
+	if !pgDumpCalled {
+		t.Fatalf("expected pg_dump exec call\ncalls:\n  %s", strings.Join(calls, "\n  "))
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one timestamp dir, got %d", len(entries))
+	}
+	dumpPath := filepath.Join(dir, entries[0].Name(), "pg-mydb.dump")
+	data, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("reading dump file %s: %v", dumpPath, err)
+	}
+	if string(data) != "DUMPBYTES" {
+		t.Errorf("dump contents: got %q, want %q", string(data), "DUMPBYTES")
+	}
+}
+
+func TestBackup_FilesystemAndPgDump_Mixed(t *testing.T) {
+	stub := newStub()
+	stub.setOutput("kubectl get deploy", "web=2 ")
+	stub.setOutput("kubectl get pvc data", "pv-data")
+	stub.setOutput("kubectl get pv pv-data", "/srv/data")
+	stub.setOutput("kubectl get pod -n app", "postgres-0 ")
+	stub.setOutput("kubectl exec -n app postgres-0 -- printenv PGDATABASE", "appdb")
+	stub.setOutput("kubectl exec -n app postgres-0 -- pg_dump", "MIX")
+
+	SetExecCommand(stub.execFn())
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	b := newBackuper(&stdout, &stderr)
+	dir := t.TempDir()
+
+	apps := []manifest.App{{
+		Name:      "app",
+		Namespace: "app",
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{
+				fsTarget("data"),
+				pgTarget("app=postgres"),
+			},
+		},
+	}}
+
+	if err := b.BackupApps(apps, dir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := stub.getCalls()
+	scaleDownCount := 0
+	scpCount := 0
+	tarCalled := false
+	pgDumpCalled := false
+	for _, c := range calls {
+		if strings.HasPrefix(c, "kubectl scale deploy web -n app --replicas=0") {
+			scaleDownCount++
+		}
+		if strings.HasPrefix(c, "scp -r pax:") {
+			scpCount++
+		}
+		if strings.HasPrefix(c, "ssh pax tar") {
+			tarCalled = true
+		}
+		if strings.HasPrefix(c, "kubectl exec -n app postgres-0 -- pg_dump") {
+			pgDumpCalled = true
+		}
+	}
+	if scaleDownCount != 1 {
+		t.Errorf("expected exactly 1 scale-down call, got %d\ncalls:\n  %s", scaleDownCount, strings.Join(calls, "\n  "))
+	}
+	if scpCount != 1 {
+		t.Errorf("expected exactly 1 scp-back call, got %d\ncalls:\n  %s", scpCount, strings.Join(calls, "\n  "))
+	}
+	if !tarCalled {
+		t.Errorf("expected tar call\ncalls:\n  %s", strings.Join(calls, "\n  "))
+	}
+	if !pgDumpCalled {
+		t.Errorf("expected pg_dump call\ncalls:\n  %s", strings.Join(calls, "\n  "))
 	}
 }
