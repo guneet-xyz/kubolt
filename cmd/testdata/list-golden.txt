@@ -1,0 +1,4 @@
+APP       NAMESPACE  STATUS    CHART           APP VERSION
+caddy     caddy      deployed  caddy-1.0.0     2.7.5
+registry  registry   deployed  registry-1.0.0  2.8.3
+walls     walls      missing   -               -

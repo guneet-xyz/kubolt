@@ -1,0 +1,14 @@
+apiVersion: kubolt.io/v1
+apps:
+  - name: caddy
+    chartPath: ./apps/caddy
+    namespace: caddy
+  - name: walls
+    chartPath: ./apps/walls
+    namespace: walls
+    dependsOn:
+      - caddy
+    backup:
+      pvcs:
+        - walls-postgres-data
+      scaleDeployments: true

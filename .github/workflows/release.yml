@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for CLI changes
+        id: check
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          CHANGES=$(git diff --name-only "$LAST_TAG"..HEAD -- . ':!website' ':!.github/workflows/website.yml')
+          if [ -n "$CHANGES" ]; then
+            echo "cli_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: go-semantic-release/action@v1
+        id: semrel
+        if: steps.check.outputs.cli_changed == 'true'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  binaries:
+    name: Build & Upload Binaries
+    needs: release
+    if: ${{ needs.release.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: v${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build cross-platform binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          LDFLAGS="-s -w -X github.com/guneet-xyz/kubolt/internal/version.Version=${VERSION}"
+
+          targets=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+
+          for t in "${targets[@]}"; do
+            GOOS="${t%/*}"
+            GOARCH="${t#*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            name="kubolt-${VERSION}-${GOOS}-${GOARCH}${EXT}"
+            echo "Building $name"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath -ldflags "$LDFLAGS" -o "dist/${name}" .
+          done
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum kubolt-* > checksums.txt
+          cat checksums.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign release artifacts (cosign keyless)
+        working-directory: dist
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          set -euo pipefail
+          # Keyless signing using GitHub's OIDC token. Verify with:
+          #   cosign verify-blob \
+          #     --certificate-identity-regexp 'https://github.com/guneet-xyz/kubolt/.github/workflows/release\.yml@.*' \
+          #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          #     --signature kubolt-vX.Y.Z-linux-amd64.sig \
+          #     --certificate kubolt-vX.Y.Z-linux-amd64.pem \
+          #     kubolt-vX.Y.Z-linux-amd64
+          for f in kubolt-* checksums.txt; do
+            [ -f "$f" ] || continue
+            echo "Signing $f"
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+          ls -la
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${VERSION}" dist/* --clobber

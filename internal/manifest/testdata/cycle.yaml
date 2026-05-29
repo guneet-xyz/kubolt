@@ -1,0 +1,12 @@
+apiVersion: kubolt.io/v1
+apps:
+  - name: a
+    chartPath: ./apps/a
+    namespace: a
+    dependsOn:
+      - b
+  - name: b
+    chartPath: ./apps/b
+    namespace: b
+    dependsOn:
+      - a

@@ -1,0 +1,5 @@
+apiVersion: kubolt.io/v1
+apps:
+  - name: ghost
+    chartPath: ./apps/does-not-exist
+    namespace: ghost

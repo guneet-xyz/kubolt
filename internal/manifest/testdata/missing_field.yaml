@@ -1,0 +1,5 @@
+apiVersion: kubolt.io/v1
+apps:
+  - name: ""
+    chartPath: ./apps/caddy
+    namespace: caddy

@@ -1,0 +1,6 @@
+apiVersion: kubolt.io/v1
+cluster: foo
+apps:
+  - name: caddy
+    chartPath: ./apps/caddy
+    namespace: caddy
