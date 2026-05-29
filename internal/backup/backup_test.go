@@ -375,7 +375,7 @@ func TestBackup_PgDumpOnly_NoSSH(t *testing.T) {
 	stub := newStub()
 	stub.setOutput("kubectl get pod -n db", "postgres-0 ")
 	stub.setOutput("kubectl exec -n db postgres-0 -- printenv PGDATABASE", "mydb")
-	stub.setOutput("kubectl exec -n db postgres-0 -- pg_dump", "DUMPBYTES")
+	stub.setOutput(pgDumpExecPrefix("db", "postgres-0"), "DUMPBYTES")
 
 	SetExecCommand(stub.execFn())
 	defer ResetExecCommand()
@@ -411,7 +411,7 @@ func TestBackup_PgDumpOnly_NoSSH(t *testing.T) {
 		if strings.HasPrefix(c, "kubectl wait") {
 			t.Errorf("no wait calls expected for pg_dump-only backup: %s", c)
 		}
-		if strings.HasPrefix(c, "kubectl exec -n db postgres-0 -- pg_dump") {
+		if strings.HasPrefix(c, pgDumpExecPrefix("db", "postgres-0")) {
 			pgDumpCalled = true
 		}
 	}
@@ -443,7 +443,7 @@ func TestBackup_FilesystemAndPgDump_Mixed(t *testing.T) {
 	stub.setOutput("kubectl get pv pv-data", "/srv/data")
 	stub.setOutput("kubectl get pod -n app", "postgres-0 ")
 	stub.setOutput("kubectl exec -n app postgres-0 -- printenv PGDATABASE", "appdb")
-	stub.setOutput("kubectl exec -n app postgres-0 -- pg_dump", "MIX")
+	stub.setOutput(pgDumpExecPrefix("app", "postgres-0"), "MIX")
 
 	SetExecCommand(stub.execFn())
 	defer ResetExecCommand()
@@ -482,7 +482,7 @@ func TestBackup_FilesystemAndPgDump_Mixed(t *testing.T) {
 		if strings.HasPrefix(c, "ssh pax tar") {
 			tarCalled = true
 		}
-		if strings.HasPrefix(c, "kubectl exec -n app postgres-0 -- pg_dump") {
+		if strings.HasPrefix(c, pgDumpExecPrefix("app", "postgres-0")) {
 			pgDumpCalled = true
 		}
 	}

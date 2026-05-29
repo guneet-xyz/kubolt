@@ -24,7 +24,7 @@ func TestIntegration_Mixed(t *testing.T) {
 	stub := newStub()
 	stub.setOutput("kubectl get pod -n walls -l app=pg", "postgres-0 ")
 	stub.setOutput("kubectl exec -n walls postgres-0 -- printenv PGDATABASE", "mydb")
-	stub.setOutput("kubectl exec -n walls postgres-0 -- pg_dump -Fc mydb", "DUMPBYTES")
+	stub.setOutput(pgDumpExecPrefix("walls", "postgres-0"), "DUMPBYTES")
 	stub.setOutput("kubectl get deploy -n walls", "web=1 ")
 	stub.setOutput("kubectl get pvc data -n walls", "pv-data")
 	stub.setOutput("kubectl get pv pv-data", "/data")
@@ -57,7 +57,7 @@ func TestIntegration_Mixed(t *testing.T) {
 	if !containsCall(calls, "ssh pax tar czf") {
 		t.Errorf("expected filesystem ssh tar call\ncalls:\n  %s", strings.Join(calls, "\n  "))
 	}
-	if !containsCall(calls, "kubectl exec -n walls postgres-0 -- pg_dump") {
+	if !containsCall(calls, pgDumpExecPrefix("walls", "postgres-0")) {
 		t.Errorf("expected pg_dump exec call\ncalls:\n  %s", strings.Join(calls, "\n  "))
 	}
 	if !containsCall(calls, "scp -r") {
@@ -193,7 +193,7 @@ func TestIntegration_DryRun(t *testing.T) {
 	}
 
 	calls := stub.getCalls()
-	if containsCall(calls, "kubectl exec -n walls pg-pod -- pg_dump") {
+	if containsCall(calls, pgDumpExecPrefix("walls", "pg-pod")) {
 		t.Errorf("dry-run must not invoke pg_dump\ncalls:\n  %s", strings.Join(calls, "\n  "))
 	}
 	if containsCall(calls, "ssh pax tar") {

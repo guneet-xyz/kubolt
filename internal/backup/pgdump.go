@@ -21,6 +21,20 @@ func init() {
 	})
 }
 
+const pgDumpEnvScript = `if [ -z "${PGUSER:-}" ]; then
+	PGUSER="${POSTGRES_USER:-${POSTGRESQL_USER:-${POSTGRESQL_USERNAME:-}}}"
+fi
+if [ -n "${PGUSER:-}" ]; then
+	export PGUSER
+fi
+if [ -z "${PGPASSWORD:-}" ]; then
+	PGPASSWORD="${POSTGRES_PASSWORD:-${POSTGRESQL_PASSWORD:-}}"
+fi
+if [ -n "${PGPASSWORD:-}" ]; then
+	export PGPASSWORD
+fi
+exec pg_dump -Fc "$1"`
+
 // Backup runs pg_dump -Fc inside the pod and streams the output to
 // localTsDir/<app>-<db>.dump. Writes to a .partial file first and
 // renames on success; leaves .partial for forensics on failure.
@@ -40,7 +54,7 @@ func (s *pgDumpStrategy) Backup(ctx context.Context, app manifest.App, target ma
 	partial := final + ".partial"
 
 	if b.DryRun {
-		fmt.Fprintf(b.Stdout, "[dry-run] kubectl exec -n %s %s -- pg_dump -Fc %s > %s\n",
+		fmt.Fprintf(b.Stdout, "[dry-run] kubectl exec -n %s %s -- sh -c '<postgres env> exec pg_dump -Fc %s' > %s\n",
 			app.Namespace, pod, db, final)
 		return nil
 	}
@@ -51,7 +65,7 @@ func (s *pgDumpStrategy) Backup(ctx context.Context, app manifest.App, target ma
 	}
 
 	// Build the pg_dump command, streaming stdout directly to the partial file.
-	cmd := execCommand("kubectl", "exec", "-n", app.Namespace, pod, "--", "pg_dump", "-Fc", db)
+	cmd := execCommand("kubectl", "exec", "-n", app.Namespace, pod, "--", "sh", "-c", pgDumpEnvScript, "--", db)
 	cmd.Stdout = f
 	cmd.Stderr = b.Stderr
 

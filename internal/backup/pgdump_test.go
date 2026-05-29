@@ -20,10 +20,14 @@ func pgDumpResolverStubs(stub *stubRecorder) {
 	stub.setOutput("kubectl exec -n walls postgres-0 -- printenv PGDATABASE", "mydb")
 }
 
+func pgDumpExecPrefix(namespace, pod string) string {
+	return "kubectl exec -n " + namespace + " " + pod + " -- sh -c"
+}
+
 func TestPgDump_Happy(t *testing.T) {
 	stub := newStub()
 	pgDumpResolverStubs(stub)
-	stub.setOutput("kubectl exec -n walls postgres-0 -- pg_dump", "PGDUMPDATA")
+	stub.setOutput(pgDumpExecPrefix("walls", "postgres-0"), "PGDUMPDATA")
 
 	SetExecCommand(stub.execFn())
 	defer ResetExecCommand()
@@ -55,10 +59,46 @@ func TestPgDump_Happy(t *testing.T) {
 	}
 }
 
+func TestPgDump_MapsPostgresEnvToLibpq(t *testing.T) {
+	stub := newStub()
+	pgDumpResolverStubs(stub)
+	stub.setOutput(pgDumpExecPrefix("walls", "postgres-0"), "PGDUMPDATA")
+
+	SetExecCommand(stub.execFn())
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	b := newBackuper(&stdout, &stderr)
+	s := newPgDumpStrategy(b)
+
+	target := manifest.Target{Type: manifest.TargetPgDump, PodSelector: "app=postgres"}
+	app := manifest.App{Name: "walls", Namespace: "walls"}
+
+	if err := s.Backup(context.Background(), app, target, t.TempDir()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var pgDumpCall string
+	for _, c := range stub.getCalls() {
+		if strings.HasPrefix(c, pgDumpExecPrefix("walls", "postgres-0")) {
+			pgDumpCall = c
+			break
+		}
+	}
+	if pgDumpCall == "" {
+		t.Fatalf("expected pg_dump exec call\ncalls:\n  %s", strings.Join(stub.getCalls(), "\n  "))
+	}
+	for _, want := range []string{"POSTGRES_USER", "POSTGRES_PASSWORD", "PGUSER", "PGPASSWORD", "exec pg_dump -Fc"} {
+		if !strings.Contains(pgDumpCall, want) {
+			t.Errorf("pg_dump call missing %q:\n%s", want, pgDumpCall)
+		}
+	}
+}
+
 func TestPgDump_NonzeroExit(t *testing.T) {
 	stub := newStub()
 	pgDumpResolverStubs(stub)
-	stub.setFailure("kubectl exec -n walls postgres-0 -- pg_dump", 1)
+	stub.setFailure(pgDumpExecPrefix("walls", "postgres-0"), 1)
 
 	SetExecCommand(stub.execFn())
 	defer ResetExecCommand()
@@ -93,7 +133,7 @@ func TestPgDump_NonzeroExit(t *testing.T) {
 func TestPgDump_Cancel(t *testing.T) {
 	stub := newStub()
 	pgDumpResolverStubs(stub)
-	stub.setOutput("kubectl exec -n walls postgres-0 -- pg_dump", "PARTIALDATA")
+	stub.setOutput(pgDumpExecPrefix("walls", "postgres-0"), "PARTIALDATA")
 
 	SetExecCommand(stub.execFn())
 	defer ResetExecCommand()
