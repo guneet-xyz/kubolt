@@ -252,6 +252,49 @@ func TestInstall_MidChainFailure(t *testing.T) {
 	}
 }
 
+func TestInstall_AllApps_NoArg(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "dep1", namespace: "ns1"},
+		{name: "dep2", namespace: "ns2", dependsOn: []string{"dep1"}},
+		{name: "leafA", namespace: "nsA", dependsOn: []string{"dep2"}},
+		{name: "leafB", namespace: "nsB", dependsOn: []string{"dep1"}},
+	})
+
+	rec := &callRecorder{}
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		rec.record(name, args...)
+		if name == "helm" && len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	if err := installApps(m, "", runner); err != nil {
+		t.Fatalf("installApps all: %v", err)
+	}
+
+	var installed []string
+	for _, c := range rec.snapshot() {
+		if len(c) >= 3 && c[0] == "helm" && c[1] == "install" {
+			installed = append(installed, c[2])
+		}
+	}
+	if len(installed) != 4 {
+		t.Fatalf("expected 4 installs (all apps), got %d: %v", len(installed), installed)
+	}
+	pos := map[string]int{}
+	for i, n := range installed {
+		pos[n] = i
+	}
+	if pos["dep1"] > pos["dep2"] || pos["dep2"] > pos["leafA"] || pos["dep1"] > pos["leafB"] {
+		t.Errorf("topo order violated: %v", installed)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

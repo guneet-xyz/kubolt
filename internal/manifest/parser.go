@@ -138,6 +138,15 @@ func (m *Manifest) InstallOrder(target string) ([]string, error) {
 	return result, nil
 }
 
+// InstallAllOrder returns every app in the manifest in dependency order.
+func (m *Manifest) InstallAllOrder() ([]string, error) {
+	adj := make(map[string][]string, len(m.Apps))
+	for _, app := range m.Apps {
+		adj[app.Name] = app.DependsOn
+	}
+	return depgraph.TopoSort(adj)
+}
+
 func transitiveDeps(adj map[string][]string, target string) map[string]bool {
 	visited := make(map[string]bool)
 	var walk func(n string)

@@ -87,9 +87,9 @@ apps:
 
 ## Commands
 
-### `install <app>`
+### `install [app]`
 
-Installs the target app along with its full dependency chain in topological order. Every app in the chain is run through `helm upgrade --install`, even if already installed, so the manifest is the source of truth.
+With an app name, installs the target app along with its full dependency chain in topological order. Without an arg, installs **every app in the manifest** in dependency order. Every app is run through `helm upgrade --install`, even if already installed, so the manifest is the source of truth.
 
 - Flags: `--dry-run` (print the helm commands without executing).
 - Environment:

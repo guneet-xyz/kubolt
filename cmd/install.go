@@ -14,9 +14,9 @@ import (
 )
 
 var installCmd = &cobra.Command{
-	Use:   "install <app>",
-	Short: "Install an app and its dependencies",
-	Args:  cobra.ExactArgs(1),
+	Use:   "install [app]",
+	Short: "Install an app and its dependencies (or all apps when no arg given)",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runInstall,
 }
 
@@ -25,7 +25,10 @@ func init() {
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
-	target := args[0]
+	var target string
+	if len(args) == 1 {
+		target = args[0]
+	}
 
 	if err := preflight.RequireBinaries("helm", "kubectl", "obscuro"); err != nil {
 		return err
@@ -62,10 +65,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 }
 
 // installApps resolves install order and runs helm install/upgrade for each
-// app in dependency order. Pure helm/manifest logic — no preflight, no I/O
-// outside the runner — so it is directly testable.
+// app in dependency order. When target is "", every app in the manifest is
+// installed in topological order. Pure helm/manifest logic — no preflight,
+// no I/O outside the runner — so it is directly testable.
 func installApps(m *manifest.Manifest, target string, runner *helm.Runner) error {
-	order, err := m.InstallOrder(target)
+	var order []string
+	var err error
+	if target == "" {
+		order, err = m.InstallAllOrder()
+	} else {
+		order, err = m.InstallOrder(target)
+	}
 	if err != nil {
 		return fmt.Errorf("resolving install order: %w", err)
 	}
