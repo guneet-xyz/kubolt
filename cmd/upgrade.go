@@ -89,7 +89,7 @@ func runUpgradeFromURLs(currentVersion, latestTagAPIURL, downloadBaseURL, goos, 
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	assetPath := filepath.Join(tmpDir, assetName)
 	assetURL := fmt.Sprintf("%s/%s/%s", downloadBaseURL, latest, assetName)
@@ -315,7 +315,7 @@ func atomicReplace(src, dst string) error {
 		return err
 	}
 	if err := os.Rename(tmpFile, dst); err != nil {
-		os.Remove(tmpFile)
+		_ = os.Remove(tmpFile)
 		return err
 	}
 	return nil

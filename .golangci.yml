@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  default: standard
+  exclusions:
+    rules:
+      # Idiomatic: deferred Close on read-only resources, fmt.Fprint to buffers/writers
+      - linters: [errcheck]
+        source: "^\\s*defer .*\\.Close\\(\\)$"
+      - linters: [errcheck]
+        source: "fmt\\.Fprint(ln|f)?\\("
+      # Tests use os.Setenv/Unsetenv/Chdir, w.Write on httptest, etc.
+      - linters: [errcheck]
+        path: _test\.go
