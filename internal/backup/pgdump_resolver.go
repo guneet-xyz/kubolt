@@ -34,7 +34,7 @@ func resolvePod(b *Backuper, namespace, selector string) (string, error) {
 func resolveDatabase(b *Backuper, namespace, pod string) (string, error) {
 	envVars := []string{"PGDATABASE", "POSTGRES_DB", "POSTGRESQL_DATABASE"}
 	for _, envVar := range envVars {
-		out, err := b.captureCmd("kubectl", "exec", "-n", namespace, pod, "--", "printenv", envVar)
+		out, err := b.captureCmdQuiet("kubectl", "exec", "-n", namespace, pod, "--", "printenv", envVar)
 		if err != nil {
 			// printenv exits non-zero when the var is not set; try next
 			continue

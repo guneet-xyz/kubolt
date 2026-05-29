@@ -226,6 +226,11 @@ func (b *Backuper) captureCmd(name string, args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 
+func (b *Backuper) captureCmdQuiet(name string, args ...string) ([]byte, error) {
+	cmd := execCommand(name, args...)
+	return cmd.Output()
+}
+
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

@@ -2,6 +2,7 @@ package backup
 
 import (
 	"bytes"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,35 @@ func TestResolvePod(t *testing.T) {
 				t.Errorf("got pod %q, want %q", got, tc.wantPod)
 			}
 		})
+	}
+}
+
+func TestResolveDatabase_PrintenvFailuresQuiet(t *testing.T) {
+	SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		full := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		switch {
+		case strings.HasSuffix(full, "printenv PGDATABASE"):
+			return exec.Command("sh", "-c", "echo 'command terminated with exit code 1' >&2; exit 1")
+		case strings.HasSuffix(full, "printenv POSTGRES_DB"):
+			return exec.Command("sh", "-c", "printf appdb")
+		default:
+			return exec.Command("sh", "-c", "exit 1")
+		}
+	})
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	b := newBackuper(&stdout, &stderr)
+
+	db, err := resolveDatabase(b, "test-ns", "pg-pod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if db != "appdb" {
+		t.Fatalf("got db %q, want appdb", db)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("expected quiet failed printenv probe, got stderr: %q", stderr.String())
 	}
 }
 
