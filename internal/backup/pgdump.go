@@ -56,7 +56,7 @@ func (s *pgDumpStrategy) Backup(ctx context.Context, app manifest.App, target ma
 	cmd.Stderr = b.Stderr
 
 	if err := cmd.Start(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("starting pg_dump for app %q: %w", app.Name, err)
 	}
 
@@ -75,7 +75,7 @@ func (s *pgDumpStrategy) Backup(ctx context.Context, app manifest.App, target ma
 	waitErr := cmd.Wait()
 	close(killDone)
 
-	f.Close()
+	_ = f.Close()
 
 	if ctx.Err() != nil {
 		return fmt.Errorf("pg_dump for app %q cancelled: %w", app.Name, ctx.Err())
