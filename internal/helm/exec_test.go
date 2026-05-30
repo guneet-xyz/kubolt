@@ -2,9 +2,11 @@ package helm
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunner_DryRun_SkipsExec(t *testing.T) {
@@ -113,5 +115,85 @@ func TestRunner_Capture_ErrorWrapped(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "false") {
 		t.Errorf("expected command name in error, got: %q", err.Error())
+	}
+}
+
+func TestRunWith_StreamsToWriters(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	r := &Runner{DryRun: false, Stdout: &stdout, Stderr: &stderr}
+	ctx := context.Background()
+	err := r.RunWith(ctx, []string{"echo", "hello", "world"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "hello") || !strings.Contains(stdout.String(), "world") {
+		t.Errorf("expected 'hello world' in stdout, got: %q", stdout.String())
+	}
+}
+
+func TestRunWith_CancelKillsProcess(t *testing.T) {
+	SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		// Use real sleep command; will be killed by context cancellation
+		return exec.Command("sleep", "30")
+	})
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	r := &Runner{DryRun: false, Stdout: &stdout, Stderr: &stderr}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := r.RunWith(ctx, []string{"sleep", "30"}, &stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("command took too long to be killed: %v", elapsed)
+	}
+}
+
+func TestRunWith_DryRunWritesPrefix(t *testing.T) {
+	called := false
+	SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		called = true
+		return exec.Command(name, args...)
+	})
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	r := &Runner{DryRun: true, Stdout: &stdout, Stderr: &stderr}
+	ctx := context.Background()
+	err := r.RunWith(ctx, []string{"helm", "install", "caddy"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Error("execCommand should not be called in dry-run mode")
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "[dry-run]") {
+		t.Errorf("expected [dry-run] prefix in output, got: %q", output)
+	}
+	if !strings.Contains(output, "helm install caddy") {
+		t.Errorf("expected command in output, got: %q", output)
+	}
+}
+
+func TestRunWith_ExistingRunUnchanged(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Runner{DryRun: false, Stdout: &buf, Stderr: &buf}
+	err := r.Run([]string{"echo", "test"})
+	if err != nil {
+		t.Fatalf("unexpected error from Run(): %v", err)
+	}
+	if !strings.Contains(buf.String(), "test") {
+		t.Errorf("expected 'test' in output from Run(), got: %q", buf.String())
 	}
 }

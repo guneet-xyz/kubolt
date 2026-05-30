@@ -61,6 +61,10 @@ func (m *Manifest) Validate() error {
 		return fmt.Errorf("%w: got %q, want %q", ErrUnsupportedAPIVersion, m.APIVersion, SupportedAPIVersion)
 	}
 
+	if m.Parallelism < 0 {
+		return fmt.Errorf("manifest: parallelism must be >= 0, got %d", m.Parallelism)
+	}
+
 	names := make(map[string]bool, len(m.Apps))
 	for _, app := range m.Apps {
 		if app.Name == "" {

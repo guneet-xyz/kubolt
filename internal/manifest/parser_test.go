@@ -156,6 +156,39 @@ func TestLoad_FileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoad_ParallelismZero(t *testing.T) {
+	path := stageManifest(t, "parallelism_zero.yaml", "apps/caddy")
+	m, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m.Parallelism != 0 {
+		t.Errorf("Parallelism = %d, want 0", m.Parallelism)
+	}
+}
+
+func TestLoad_ParallelismPositive(t *testing.T) {
+	path := stageManifest(t, "parallelism_positive.yaml", "apps/caddy")
+	m, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m.Parallelism != 4 {
+		t.Errorf("Parallelism = %d, want 4", m.Parallelism)
+	}
+}
+
+func TestLoad_ParallelismNegative(t *testing.T) {
+	path := stageManifest(t, "parallelism_negative.yaml", "apps/caddy")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "parallelism") {
+		t.Errorf("error %q missing 'parallelism'", err)
+	}
+}
+
 func TestApplyDefaults_RespectsExplicitFalse(t *testing.T) {
 	f := false
 	m := &Manifest{
@@ -212,6 +245,57 @@ func TestValidate_EmptyBackupTargets(t *testing.T) {
 	err := m.Validate()
 	if err == nil || !strings.Contains(err.Error(), "targets") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidate_NegativeParallelism(t *testing.T) {
+	dir := t.TempDir()
+	writeChartYamls(t, dir, "x")
+	m := &Manifest{
+		APIVersion:  SupportedAPIVersion,
+		Parallelism: -1,
+		Apps:        []App{{Name: "a", ChartPath: "x", Namespace: "a"}},
+		dir:         dir,
+	}
+	err := m.Validate()
+	if err == nil || !strings.Contains(err.Error(), "parallelism") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidate_ZeroParallelism(t *testing.T) {
+	dir := t.TempDir()
+	writeChartYamls(t, dir, "x")
+	m := &Manifest{
+		APIVersion:  SupportedAPIVersion,
+		Parallelism: 0,
+		Apps:        []App{{Name: "a", ChartPath: "x", Namespace: "a"}},
+		dir:         dir,
+	}
+	err := m.Validate()
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if m.Parallelism != 0 {
+		t.Errorf("Parallelism = %d, want 0", m.Parallelism)
+	}
+}
+
+func TestValidate_PositiveParallelism(t *testing.T) {
+	dir := t.TempDir()
+	writeChartYamls(t, dir, "x")
+	m := &Manifest{
+		APIVersion:  SupportedAPIVersion,
+		Parallelism: 4,
+		Apps:        []App{{Name: "a", ChartPath: "x", Namespace: "a"}},
+		dir:         dir,
+	}
+	err := m.Validate()
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if m.Parallelism != 4 {
+		t.Errorf("Parallelism = %d, want 4", m.Parallelism)
 	}
 }
 

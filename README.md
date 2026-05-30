@@ -112,11 +112,45 @@ apps:
 
 With an app name, installs the target app along with its full dependency chain in topological order. Without an arg, installs **every app in the manifest** in dependency order. Every app is run through `helm upgrade --install`, even if already installed, so the manifest is the source of truth.
 
-- Flags: `--dry-run` (print the helm commands without executing).
+- Flags: `--dry-run` (print the helm commands without executing), `--parallelism N`, `--no-tui`.
 - Environment:
   - `HELM_FORCE_CONFLICTS`: when set, appends `--force-conflicts` to helm calls.
   - `HELM_TAKE_OWNERSHIP`: when set, appends `--take-ownership` to helm calls.
+  - `NO_COLOR`: when set, disables ANSI color in all output.
 - Exit codes: `0` on success, non-zero on manifest, dependency, or helm failure.
+
+#### Parallel installs
+
+Kubolt installs apps in **waves**. A wave is a set of apps with no dependency on each other, so they're installed simultaneously. Each wave waits for the previous one to finish before starting, which guarantees dependents always see their dependencies installed.
+
+`helm dependency build` always runs serially (once per chart, before the parallel phase) because the chart cache isn't safe for concurrent writers.
+
+**`--parallelism N`** controls how many apps may install at once within a wave:
+
+- Default `-1`: read `parallelism:` from the manifest, or fall back to `4`.
+- `1`: serial mode. Useful when debugging a single failing chart.
+- `N > 1`: cap concurrent installs at `N`.
+
+The flag always wins over the manifest field.
+
+```yaml
+apiVersion: kubolt.io/v1
+parallelism: 4
+apps:
+  - name: cert-manager
+    ...
+```
+
+**Output modes:**
+
+- Interactive terminal: a live [pterm](https://github.com/pterm/pterm) dashboard with per-app status, spinner, and elapsed time.
+- Piped or non-TTY (CI logs, `tee`, redirected output): prefixed lines like `[cert-manager] installing...`, one stream per app, interleaved.
+- `--no-tui`: forces the prefixed line format even when stdout is a real terminal. Handy for debugging or screen-recording.
+- `NO_COLOR=1`: disables color in both modes.
+
+**Failure behavior:**
+
+When an app fails, its transitive dependents are marked **SKIPPED** in the output and never start. Unrelated apps in the same or later waves keep running to completion. The exit code is non-zero if any app actually failed; SKIPPED apps don't on their own cause a non-zero exit.
 
 ### `uninstall <app>`
 

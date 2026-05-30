@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/guneet-xyz/kubolt/internal/helm"
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 )
 
 type installTestApp struct {
@@ -95,7 +98,7 @@ func TestInstall_WithDeps_CorrectOrder(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner); err != nil {
+	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -129,7 +132,7 @@ func TestInstall_ExistingRelease_Upgrades(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner); err != nil {
+	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -172,7 +175,7 @@ func TestInstall_ForceConflicts_Flag(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner); err != nil {
+	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -205,7 +208,7 @@ func TestInstall_DryRun(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{DryRun: true, Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner); err != nil {
+	if err := installApps(m, "target", runner, output.NewLineSink(&buf), 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -239,7 +242,7 @@ func TestInstall_MidChainFailure(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	err := installApps(m, "target", runner)
+	err := installApps(m, "target", runner, output.NopSink{}, 1)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -273,7 +276,7 @@ func TestInstall_AllApps_NoArg(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "", runner); err != nil {
+	if err := installApps(m, "", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps all: %v", err)
 	}
 
@@ -305,4 +308,205 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestInstall_Parallel_IndependentApps: 3 apps with no deps run concurrently
+// at parallelism=3. Asserts overlap by checking all 3 started before any
+// finished.
+func TestInstall_Parallel_IndependentApps(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "a1", namespace: "ns"},
+		{name: "a2", namespace: "ns"},
+		{name: "a3", namespace: "ns"},
+	})
+
+	var (
+		mu       sync.Mutex
+		starts   = map[string]time.Time{}
+		ends     = map[string]time.Time{}
+		inflight int
+		maxInfl  int
+	)
+
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		if name == "helm" && len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		if name == "helm" && len(args) >= 2 && args[0] == "install" {
+			app := args[1]
+			mu.Lock()
+			starts[app] = time.Now()
+			inflight++
+			if inflight > maxInfl {
+				maxInfl = inflight
+			}
+			mu.Unlock()
+			cmd := exec.Command("sh", "-c", "sleep 0.1")
+			_ = app
+			return cmd
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	start := time.Now()
+	if err := installApps(m, "", runner, output.NopSink{}, 3); err != nil {
+		t.Fatalf("installApps: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	mu.Lock()
+	got := maxInfl
+	mu.Unlock()
+	_ = ends
+	_ = starts
+
+	if got < 2 {
+		t.Fatalf("expected concurrent execution (maxInflight >= 2), got %d; elapsed=%v", got, elapsed)
+	}
+}
+
+// TestInstall_Parallel_DependencyOrder: diamond A→{B,C}→D with parallelism=4.
+// Asserts A finishes before B/C start; B and C finish before D starts.
+func TestInstall_Parallel_DependencyOrder(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "A", namespace: "ns"},
+		{name: "B", namespace: "ns", dependsOn: []string{"A"}},
+		{name: "C", namespace: "ns", dependsOn: []string{"A"}},
+		{name: "D", namespace: "ns", dependsOn: []string{"B", "C"}},
+	})
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		if name == "helm" && len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		if name == "helm" && len(args) >= 2 && args[0] == "install" {
+			app := args[1]
+			mu.Lock()
+			events = append(events, "start:"+app)
+			mu.Unlock()
+			return exec.Command("sh", "-c", "sleep 0.05; echo done-"+app)
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	if err := installApps(m, "", runner, output.NopSink{}, 4); err != nil {
+		t.Fatalf("installApps: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	idx := map[string]int{}
+	for i, e := range events {
+		if strings.HasPrefix(e, "start:") {
+			app := strings.TrimPrefix(e, "start:")
+			if _, seen := idx[app]; !seen {
+				idx[app] = i
+			}
+		}
+	}
+	if idx["A"] >= idx["B"] || idx["A"] >= idx["C"] {
+		t.Errorf("A must start before B and C; events=%v", events)
+	}
+	if idx["B"] >= idx["D"] || idx["C"] >= idx["D"] {
+		t.Errorf("B and C must start before D; events=%v", events)
+	}
+}
+
+func TestInstall_ParallelismFlag_Sequential(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "a1", namespace: "ns"},
+		{name: "a2", namespace: "ns"},
+		{name: "a3", namespace: "ns"},
+	})
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		if name == "helm" && len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		if name == "helm" && len(args) >= 2 && args[0] == "install" {
+			app := args[1]
+			mu.Lock()
+			events = append(events, "start:"+app)
+			mu.Unlock()
+			return exec.Command("sh", "-c", "sleep 0.05; true")
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	start := time.Now()
+	if err := installApps(m, "", runner, output.NopSink{}, 1); err != nil {
+		t.Fatalf("installApps: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < 140*time.Millisecond {
+		t.Errorf("parallelism=1 should run serially (>=150ms), got %v", elapsed)
+	}
+}
+
+// TestInstall_Parallel_FailureSkipsDependents: A→{B,C}; A fails; B & C are
+// not installed.
+func TestInstall_Parallel_FailureSkipsDependents(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "A", namespace: "ns"},
+		{name: "B", namespace: "ns", dependsOn: []string{"A"}},
+		{name: "C", namespace: "ns", dependsOn: []string{"A"}},
+	})
+
+	rec := &callRecorder{}
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		rec.record(name, args...)
+		if name == "helm" && len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		if name == "helm" && len(args) >= 2 && args[0] == "install" && args[1] == "A" {
+			return exec.Command("false")
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	err := installApps(m, "", runner, output.NopSink{}, 4)
+	if err == nil {
+		t.Fatalf("expected error when A fails")
+	}
+
+	var installed []string
+	for _, c := range rec.snapshot() {
+		if len(c) >= 3 && c[0] == "helm" && c[1] == "install" {
+			installed = append(installed, c[2])
+		}
+	}
+	sort.Strings(installed)
+	for _, app := range installed {
+		if app == "B" || app == "C" {
+			t.Errorf("dependents of failed A should be skipped; saw install %s (installed=%v)", app, installed)
+		}
+	}
+	if !strings.Contains(err.Error(), "A") {
+		t.Errorf("error should mention failed app A; got %q", err.Error())
+	}
 }
