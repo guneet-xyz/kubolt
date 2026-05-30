@@ -7,7 +7,7 @@ import (
 
 func TestNopSink(t *testing.T) {
 	sink := NopSink{}
-	
+
 	eventKinds := []EventKind{
 		WaveStart,
 		WaveEnd,
@@ -17,7 +17,7 @@ func TestNopSink(t *testing.T) {
 		AppSkip,
 		AllDone,
 	}
-	
+
 	for _, kind := range eventKinds {
 		// Should not panic
 		sink.Emit(Event{Kind: kind})
@@ -27,11 +27,11 @@ func TestNopSink(t *testing.T) {
 func TestNewLineSink_ReturnsSink(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
-	
+
 	if sink == nil {
 		t.Fatal("NewLineSink returned nil")
 	}
-	
+
 	// Should be a valid Sink
 	var _ Sink = sink
 }
@@ -39,11 +39,11 @@ func TestNewLineSink_ReturnsSink(t *testing.T) {
 func TestNewTUISink_ReturnsSink(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewTUISink(w)
-	
+
 	if sink == nil {
 		t.Fatal("NewTUISink returned nil")
 	}
-	
+
 	// Should be a valid Sink
 	var _ Sink = sink
 }

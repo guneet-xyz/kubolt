@@ -2,9 +2,9 @@ package manifest
 
 // Manifest is the top-level structure of a kubolt.yaml file.
 type Manifest struct {
-	APIVersion string `yaml:"apiVersion"` // must be "kubolt.io/v1"
-	Apps       []App  `yaml:"apps"`
-	Parallelism int   `yaml:"parallelism,omitempty"` // max concurrent helm operations, 0 = serial
+	APIVersion  string `yaml:"apiVersion"` // must be "kubolt.io/v1"
+	Apps        []App  `yaml:"apps"`
+	Parallelism int    `yaml:"parallelism,omitempty"` // max concurrent helm operations, 0 = serial
 
 	// dir is the directory containing the loaded manifest file.
 	// Unexported so yaml.v3 ignores it. Set by Load().
