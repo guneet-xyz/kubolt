@@ -183,7 +183,7 @@ func (t *TUISink) apply(e Event) {
 func (t *TUISink) finish(area *pterm.AreaPrinter) {
 	if area != nil {
 		t.renderArea(area)
-		area.Stop()
+		_ = area.Stop()
 	}
 
 	t.printSummary()

@@ -19,7 +19,6 @@ func TestNopSink(t *testing.T) {
 	}
 
 	for _, kind := range eventKinds {
-		// Should not panic
 		sink.Emit(Event{Kind: kind})
 	}
 }
@@ -32,8 +31,7 @@ func TestNewLineSink_ReturnsSink(t *testing.T) {
 		t.Fatal("NewLineSink returned nil")
 	}
 
-	// Should be a valid Sink
-	var _ Sink = sink
+	var _ = sink
 }
 
 func TestNewTUISink_ReturnsSink(t *testing.T) {
@@ -44,6 +42,5 @@ func TestNewTUISink_ReturnsSink(t *testing.T) {
 		t.Fatal("NewTUISink returned nil")
 	}
 
-	// Should be a valid Sink
-	var _ Sink = sink
+	var _ = sink
 }
