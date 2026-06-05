@@ -13,17 +13,12 @@ func TestLineSink_BasicOutput(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
-	sink.Emit(Event{Kind: WaveStart, Wave: 0})
 	sink.Emit(Event{Kind: AppStart, App: "app1"})
 	sink.Emit(Event{Kind: AppLine, App: "app1", Text: "hello\nworld\n"})
 	sink.Emit(Event{Kind: AppDone, App: "app1"})
-	sink.Emit(Event{Kind: WaveEnd, Wave: 0})
 
 	output := w.String()
 
-	if !strings.Contains(output, "=== Wave 1 starting ===") {
-		t.Errorf("expected Wave 1 start marker, got: %q", output)
-	}
 	if !strings.Contains(output, "[app1] starting") {
 		t.Errorf("expected app1 start marker, got: %q", output)
 	}
@@ -35,9 +30,6 @@ func TestLineSink_BasicOutput(t *testing.T) {
 	}
 	if !strings.Contains(output, "[app1] OK in") {
 		t.Errorf("expected app1 OK marker, got: %q", output)
-	}
-	if !strings.Contains(output, "=== Wave 1 done ===") {
-		t.Errorf("expected Wave 1 end marker, got: %q", output)
 	}
 }
 
@@ -85,11 +77,11 @@ func TestLineSink_NoANSI(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
-	sink.Emit(Event{Kind: WaveStart, Wave: 0})
-	sink.Emit(Event{Kind: AppStart, App: "testapp"})
-	sink.Emit(Event{Kind: AppLine, App: "testapp", Text: "output line\n"})
-	sink.Emit(Event{Kind: AppDone, App: "testapp"})
-	sink.Emit(Event{Kind: AllDone})
+	sink.Emit(Event{Kind: TreeStart, Wave: 1})
+	sink.Emit(Event{Kind: NodeStart, App: "testapp"})
+	sink.Emit(Event{Kind: NodeLine, App: "testapp", Text: "output line\n"})
+	sink.Emit(Event{Kind: NodeDone, App: "testapp"})
+	sink.Emit(Event{Kind: TreeDone})
 
 	output := w.Bytes()
 
@@ -168,7 +160,7 @@ func TestLineSink_AllDone(t *testing.T) {
 	}
 }
 
-func TestLineSink_ConcurrentWaveEmit(t *testing.T) {
+func TestLineSink_ConcurrentEmit(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
@@ -212,30 +204,6 @@ func TestLineSink_ConcurrentWaveEmit(t *testing.T) {
 	}
 }
 
-func TestLineSink_MultipleWaves(t *testing.T) {
-	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
-
-	for wave := 0; wave < 3; wave++ {
-		sink.Emit(Event{Kind: WaveStart, Wave: wave})
-		sink.Emit(Event{Kind: AppStart, App: "app1"})
-		sink.Emit(Event{Kind: AppDone, App: "app1"})
-		sink.Emit(Event{Kind: WaveEnd, Wave: wave})
-	}
-
-	output := w.String()
-
-	if strings.Count(output, "=== Wave 1 starting ===") != 1 {
-		t.Errorf("expected 1 Wave 1 start, got: %q", output)
-	}
-	if strings.Count(output, "=== Wave 2 starting ===") != 1 {
-		t.Errorf("expected 1 Wave 2 start, got: %q", output)
-	}
-	if strings.Count(output, "=== Wave 3 starting ===") != 1 {
-		t.Errorf("expected 1 Wave 3 start, got: %q", output)
-	}
-}
-
 func TestLineSink_EmptyApp(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
@@ -250,5 +218,148 @@ func TestLineSink_EmptyApp(t *testing.T) {
 	}
 	if !strings.Contains(output, "[silent-app] OK") {
 		t.Errorf("expected app OK, got: %q", output)
+	}
+}
+
+func TestLineSink_TreeFraming(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: TreeStart, Wave: 3})
+	sink.Emit(Event{Kind: TreeDone})
+
+	output := w.String()
+
+	if !strings.Contains(output, "=== Starting (3 apps) ===") {
+		t.Errorf("expected tree start marker, got: %q", output)
+	}
+	if !strings.Contains(output, "=== Complete (succeeded=0 failed=0 skipped=0) ===") {
+		t.Errorf("expected tree done marker, got: %q", output)
+	}
+}
+
+func TestLineSink_TreeDone_CountsAggregated(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: TreeStart, Wave: 4})
+
+	sink.Emit(Event{Kind: NodeStart, App: "ok1"})
+	sink.Emit(Event{Kind: NodeDone, App: "ok1"})
+
+	sink.Emit(Event{Kind: NodeStart, App: "ok2"})
+	sink.Emit(Event{Kind: NodeDone, App: "ok2"})
+
+	sink.Emit(Event{Kind: NodeStart, App: "bad"})
+	sink.Emit(Event{Kind: NodeDone, App: "bad", Err: errors.New("boom")})
+
+	sink.Emit(Event{Kind: NodeSkip, App: "skip", Reason: "dep failed"})
+
+	sink.Emit(Event{Kind: TreeDone})
+
+	output := w.String()
+
+	if !strings.Contains(output, "=== Complete (succeeded=2 failed=1 skipped=1) ===") {
+		t.Errorf("expected aggregated counts, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeStartDone_OK(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: NodeStart, App: "x"})
+	sink.Emit(Event{Kind: NodeDone, App: "x"})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[x] starting") {
+		t.Errorf("expected [x] starting, got: %q", output)
+	}
+	if !strings.Contains(output, "[x] OK in") {
+		t.Errorf("expected [x] OK in marker, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeDone_Failed(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: NodeStart, App: "x"})
+	sink.Emit(Event{Kind: NodeDone, App: "x", Err: errors.New("boom")})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[x] FAILED in") {
+		t.Errorf("expected [x] FAILED in marker, got: %q", output)
+	}
+	if !strings.Contains(output, "boom") {
+		t.Errorf("expected error message in output, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeSkip(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: NodeSkip, App: "x", Reason: "dep failed"})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[x] SKIPPED: dep failed") {
+		t.Errorf("expected [x] SKIPPED line, got: %q", output)
+	}
+}
+
+func TestLineSink_NoWaveMarkers(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: WaveStart, Wave: 0})
+	sink.Emit(Event{Kind: WaveStart, Wave: 1})
+	sink.Emit(Event{Kind: WaveEnd, Wave: 0})
+	sink.Emit(Event{Kind: WaveEnd, Wave: 1})
+
+	output := w.String()
+
+	if strings.Contains(output, "=== Wave") {
+		t.Errorf("expected no Wave markers, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLineWithStage(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: NodeStart, App: "x"})
+	sink.Emit(Event{Kind: NodeLine, App: "x", Text: "step1\n", Stage: "scaling-down"})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[x] [scaling-down] step1") {
+		t.Errorf("expected stage-prefixed line, got: %q", output)
+	}
+}
+
+func TestLineSink_PartialLineBuffering(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w)
+
+	sink.Emit(Event{Kind: NodeStart, App: "x"})
+	sink.Emit(Event{Kind: NodeLine, App: "x", Text: "hel"})
+
+	if strings.Contains(w.String(), "[x] hel") {
+		t.Errorf("partial chunk should not be flushed yet, got: %q", w.String())
+	}
+
+	sink.Emit(Event{Kind: NodeLine, App: "x", Text: "lo\n"})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[x] hello") {
+		t.Errorf("expected joined [x] hello line, got: %q", output)
+	}
+	if strings.Contains(output, "[x] hel\n") {
+		t.Errorf("partial chunk should not have produced its own line, got: %q", output)
 	}
 }

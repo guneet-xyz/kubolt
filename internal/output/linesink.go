@@ -11,10 +11,13 @@ import (
 // LineSink writes human-readable prefixed output to an io.Writer.
 // Safe for concurrent use. No ANSI escape codes by default.
 type LineSink struct {
-	mu       sync.Mutex
-	w        io.Writer
-	appStart map[string]time.Time // track elapsed per app
-	appBuf   map[string][]byte    // partial-line buffer per app
+	mu        sync.Mutex
+	w         io.Writer
+	appStart  map[string]time.Time // track elapsed per app
+	appBuf    map[string][]byte    // partial-line buffer per app
+	succeeded int
+	failed    int
+	skipped   int
 }
 
 // NewLineSink returns a Sink that writes prefixed lines to w.
@@ -34,7 +37,7 @@ func (s *LineSink) Emit(e Event) {
 
 	switch e.Kind {
 	case WaveStart:
-		fmt.Fprintf(s.w, "=== Wave %d starting ===\n", e.Wave+1)
+		// no-op: wave markers dropped in tree-based vocabulary
 
 	case AppStart:
 		s.appStart[e.App] = time.Now()
@@ -63,10 +66,52 @@ func (s *LineSink) Emit(e Event) {
 		fmt.Fprintf(s.w, "[%s] SKIPPED: %s\n", e.App, e.Reason)
 
 	case WaveEnd:
-		fmt.Fprintf(s.w, "=== Wave %d done ===\n", e.Wave+1)
+		// no-op: wave markers dropped in tree-based vocabulary
 
 	case AllDone:
 		fmt.Fprintf(s.w, "=== Installation complete ===\n")
+
+	case TreeStart:
+		// e.Wave carries the total app count for tree-based execution
+		fmt.Fprintf(s.w, "=== Starting (%d apps) ===\n", e.Wave)
+
+	case NodeStart:
+		s.appStart[e.App] = time.Now()
+		fmt.Fprintf(s.w, "[%s] starting\n", e.App)
+
+	case NodeLine:
+		// Buffer partial lines per app; flush complete lines.
+		// Stage prefixes each emitted line when non-empty.
+		s.appBuf[e.App] = append(s.appBuf[e.App], []byte(e.Text)...)
+		if e.Stage != "" {
+			s.flushLinesWithStage(e.App, e.Stage)
+		} else {
+			s.flushLines(e.App)
+		}
+
+	case NodeDone:
+		// Flush any remaining buffered content
+		if len(s.appBuf[e.App]) > 0 {
+			fmt.Fprintf(s.w, "[%s] %s\n", e.App, string(s.appBuf[e.App]))
+			delete(s.appBuf, e.App)
+		}
+		elapsed := time.Since(s.appStart[e.App]).Truncate(time.Millisecond)
+		if e.Err != nil {
+			fmt.Fprintf(s.w, "[%s] FAILED in %s: %v\n", e.App, elapsed, e.Err)
+			s.failed++
+		} else {
+			fmt.Fprintf(s.w, "[%s] OK in %s\n", e.App, elapsed)
+			s.succeeded++
+		}
+		delete(s.appStart, e.App)
+
+	case NodeSkip:
+		fmt.Fprintf(s.w, "[%s] SKIPPED: %s\n", e.App, e.Reason)
+		s.skipped++
+
+	case TreeDone:
+		fmt.Fprintf(s.w, "=== Complete (succeeded=%d failed=%d skipped=%d) ===\n",
+			s.succeeded, s.failed, s.skipped)
 	}
 }
 
@@ -82,6 +127,22 @@ func (s *LineSink) flushLines(app string) {
 		line := string(buf[:idx])
 		buf = buf[idx+1:]
 		fmt.Fprintf(s.w, "[%s] %s\n", app, line)
+	}
+	s.appBuf[app] = buf
+}
+
+// flushLinesWithStage flushes complete lines with a stage prefix:
+// "[app] [stage] line". Must be called with mu held.
+func (s *LineSink) flushLinesWithStage(app, stage string) {
+	buf := s.appBuf[app]
+	for {
+		idx := bytes.IndexByte(buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(buf[:idx])
+		buf = buf[idx+1:]
+		fmt.Fprintf(s.w, "[%s] [%s] %s\n", app, stage, line)
 	}
 	s.appBuf[app] = buf
 }
