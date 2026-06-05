@@ -30,7 +30,7 @@ var installCmd = &cobra.Command{
 
 func init() {
 	installCmd.Flags().Int("parallelism", -1, "max concurrent installs per wave (-1 = use manifest or default 4, 1 = sequential)")
-	installCmd.Flags().Bool("no-tui", false, "disable interactive TUI; always use prefixed line output")
+	installCmd.Flags().Bool("no-tui", false, "disable interactive TUI; use plain prefixed-line output (deprecated: use --plain)")
 	rootCmd.AddCommand(installCmd)
 }
 

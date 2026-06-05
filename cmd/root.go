@@ -25,4 +25,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().BoolP("dry-run", "", false, "Print commands without executing them")
+	rootCmd.PersistentFlags().Bool("plain", false, "force plain prefixed-line output (no TUI)")
+	rootCmd.PersistentFlags().Bool("tui", false, "force Bubble Tea TUI (even when not a terminal)")
+	rootCmd.MarkFlagsMutuallyExclusive("plain", "tui")
 }
