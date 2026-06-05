@@ -18,7 +18,6 @@ import (
 	"github.com/guneet-xyz/kubolt/internal/output"
 	"github.com/guneet-xyz/kubolt/internal/preflight"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 var installCmd = &cobra.Command{
@@ -34,15 +33,6 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
-// isTerminal reports whether w refers to a real terminal file descriptor.
-// Non-file writers (such as bytes.Buffer in tests) are treated as non-TTY.
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(int(f.Fd()))
-}
 
 func runInstall(cmd *cobra.Command, args []string) error {
 	var target string
@@ -96,7 +86,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	var sink output.Sink
-	if noTUI || os.Getenv("NO_COLOR") != "" || !isTerminal(Stdout) {
+	if noTUI || os.Getenv("NO_COLOR") != "" || !isInteractive(Stdout) {
 		sink = output.NewLineSink(Stdout)
 	} else {
 		ts := output.NewTUISink(Stdout)
