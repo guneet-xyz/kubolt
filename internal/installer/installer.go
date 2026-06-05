@@ -289,3 +289,27 @@ func (w *lineWriter) Flush() {
 	})
 	w.buf.Reset()
 }
+
+// TreePlan describes a tree-based install plan (as opposed to the wave-based Plan).
+type TreePlan struct {
+	// Nodes maps an app name to its direct dependencies (e.g. "app-a" → ["app-b", "app-c"])
+	Nodes map[string][]string
+	// Jobs maps app name → job.
+	Jobs map[string]AppJob
+	// Dependents maps an app name to all transitive apps that depend on it.
+	Dependents map[string][]string
+}
+
+// TreeExecutor runs a TreePlan.
+type TreeExecutor struct {
+	// Parallelism caps in-flight jobs. Values <=1 run sequentially.
+	Parallelism int
+	// Sink receives progress events. If nil, events are discarded.
+	Sink output.Sink
+}
+
+// Run executes the tree plan and returns a Result. The returned error is non-nil
+// if at least one job failed or the context was cancelled.
+func (e *TreeExecutor) Run(ctx context.Context, p TreePlan) (Result, error) {
+	panic("not implemented — see Task 7")
+}
