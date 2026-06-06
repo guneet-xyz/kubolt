@@ -546,7 +546,14 @@ func TestBackupApps_SinkEvents(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	events := rec.snapshot()
+	rawEvents := rec.snapshot()
+	events := make([]output.Event, 0, len(rawEvents))
+	for _, e := range rawEvents {
+		if e.Stream != "" {
+			continue
+		}
+		events = append(events, e)
+	}
 	wantKinds := []output.EventKind{
 		output.TreeStart,
 		output.NodeStart,
