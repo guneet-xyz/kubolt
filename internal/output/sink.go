@@ -9,9 +9,7 @@ import (
 type EventKind int
 
 const (
-	WaveStart EventKind = iota
-	WaveEnd
-	AppStart
+	AppStart EventKind = iota
 	AppLine
 	AppDone
 	AppSkip
@@ -22,14 +20,14 @@ const (
 	NodeLine   // a line of output from the node's helm subprocess
 	NodeDone   // node execution completed (check Err for failure)
 	NodeSkip   // node skipped due to dep failure (check Reason)
-	TreeStart  // entire tree execution starting (Wave field = total count)
+	TreeStart  // entire tree execution starting (Count field = total count)
 	TreeDone   // entire tree execution finished
 )
 
 // Event carries data about an install lifecycle event.
 type Event struct {
 	Kind    EventKind
-	Wave    int       // wave index (0-based)
+	Count   int       // node count for TreeStart
 	App     string    // app name
 	Stream  string    // "stdout" or "stderr"
 	Text    string    // line content (AppLine only)
@@ -42,10 +40,6 @@ type Event struct {
 // String returns the name of the EventKind.
 func (k EventKind) String() string {
 	switch k {
-	case WaveStart:
-		return "WaveStart"
-	case WaveEnd:
-		return "WaveEnd"
 	case AppStart:
 		return "AppStart"
 	case AppLine:

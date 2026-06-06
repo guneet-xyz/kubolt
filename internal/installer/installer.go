@@ -1,4 +1,4 @@
-// Package installer provides a wave-based parallel executor for app install
+// Package installer provides a tree-based parallel executor for app install
 // jobs. It supports best-effort failure handling: when an app fails, all of
 // its transitive dependents are skipped, but unrelated apps continue.
 package installer
@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"sync"
 
+	"github.com/guneet-xyz/kubolt/internal/depgraph"
 	"github.com/guneet-xyz/kubolt/internal/output"
 )
 
@@ -19,21 +21,19 @@ type AppJob struct {
 	Run func(ctx context.Context, stdout, stderr io.Writer) error
 }
 
-// Plan describes a full install plan.
+// Plan describes a tree-based install plan.
 type Plan struct {
-	// Waves is the wave-ordered list of app names (from depgraph.Waves()).
-	Waves [][]string
+	// Nodes maps an app name to its direct dependencies (e.g. "app-a" → ["app-b", "app-c"])
+	Nodes map[string][]string
 	// Jobs maps app name → job.
 	Jobs map[string]AppJob
 	// Dependents maps an app name to all transitive apps that depend on it.
-	// If app A is in this map and A fails, every name in Dependents[A] is
-	// skipped.
 	Dependents map[string][]string
 }
 
 // Executor runs a Plan.
 type Executor struct {
-	// Parallelism caps in-flight jobs per wave. Values <=1 run sequentially.
+	// Parallelism caps in-flight jobs. Values <=1 run sequentially.
 	Parallelism int
 	// Sink receives progress events. If nil, events are discarded.
 	Sink output.Sink
@@ -59,126 +59,90 @@ func (e *Executor) Run(ctx context.Context, p Plan) (Result, error) {
 		sink = output.NopSink{}
 	}
 
+	sink.Emit(output.Event{Kind: output.TreeStart, Count: len(p.Nodes)})
+
+	w, err := depgraph.NewWalker(p.Nodes)
+	if err != nil {
+		sink.Emit(output.Event{Kind: output.TreeDone})
+		return Result{}, err
+	}
+
+	ch := w.Walk(ctx)
+
+	semCap := max(e.Parallelism, 1)
+	sem := make(chan struct{}, semCap)
+
 	var (
+		wg        sync.WaitGroup
 		mu        sync.Mutex
-		skipSet   = make(map[string]bool)
-		started   = make(map[string]bool)
 		succeeded []string
 		failed    []string
 		skipped   []string
 	)
 
-	addSkipsLocked := func(names []string) {
-		for _, n := range names {
-			skipSet[n] = true
-		}
-	}
+	for r := range ch {
+		parents := p.Nodes[r.Name]
+		sink.Emit(output.Event{Kind: output.NodeReady, App: r.Name, Parents: parents})
 
-waves:
-	for waveIdx, wave := range p.Waves {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			break waves
-		}
-
-		sink.Emit(output.Event{Kind: output.WaveStart, Wave: waveIdx})
-
-		// Snapshot skip status & build list of runnable jobs.
-		mu.Lock()
-		runnable := make([]string, 0, len(wave))
-		for _, name := range wave {
-			if skipSet[name] {
-				skipped = append(skipped, name)
-				continue
-			}
-			runnable = append(runnable, name)
-			started[name] = true
-		}
-		mu.Unlock()
-
-		// Emit skips for apps in this wave that were already in skipSet.
-		for _, name := range wave {
+		if len(r.DepFailures) > 0 {
 			mu.Lock()
-			isSkip := skipSet[name] && !started[name]
+			skipped = append(skipped, r.Name)
 			mu.Unlock()
-			if isSkip {
-				sink.Emit(output.Event{Kind: output.AppSkip, Wave: waveIdx, App: name, Reason: "dependency failed"})
-			}
+			sink.Emit(output.Event{
+				Kind:    output.NodeSkip,
+				App:     r.Name,
+				Parents: parents,
+				Reason:  "dependency failed: " + strings.Join(r.DepFailures, ", "),
+			})
+			// Walker has already counted cascaded nodes; do NOT call w.Done().
+			continue
 		}
 
-		runOne := func(name string) {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(name string, parents []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
 			job, ok := p.Jobs[name]
 			if !ok {
+				err := errMissing(name)
+				w.Done(name, err)
 				mu.Lock()
 				failed = append(failed, name)
-				addSkipsLocked(p.Dependents[name])
 				mu.Unlock()
-				sink.Emit(output.Event{Kind: output.AppDone, Wave: waveIdx, App: name, Err: errMissing(name)})
+				sink.Emit(output.Event{Kind: output.NodeDone, App: name, Parents: parents, Err: err})
 				return
 			}
 
-			sink.Emit(output.Event{Kind: output.AppStart, Wave: waveIdx, App: name})
+			sink.Emit(output.Event{Kind: output.NodeStart, App: name, Parents: parents})
 
-			stdout := newLineWriter(sink, waveIdx, name, "stdout")
-			stderr := newLineWriter(sink, waveIdx, name, "stderr")
+			stdout := newNodeLineWriter(sink, name, parents, "stdout")
+			stderr := newNodeLineWriter(sink, name, parents, "stderr")
 
-			err := job.Run(ctx, stdout, stderr)
+			runErr := job.Run(ctx, stdout, stderr)
 			stdout.Flush()
 			stderr.Flush()
 
-			sink.Emit(output.Event{Kind: output.AppDone, Wave: waveIdx, App: name, Err: err})
+			w.Done(name, runErr)
 
 			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
+			if runErr != nil {
 				failed = append(failed, name)
-				addSkipsLocked(p.Dependents[name])
 			} else {
 				succeeded = append(succeeded, name)
 			}
-		}
+			mu.Unlock()
 
-		if e.Parallelism <= 1 {
-			for _, name := range runnable {
-				runOne(name)
-			}
-		} else {
-			sem := make(chan struct{}, e.Parallelism)
-			var wg sync.WaitGroup
-			for _, name := range runnable {
-				name := name
-				wg.Add(1)
-				sem <- struct{}{}
-				go func() {
-					defer wg.Done()
-					defer func() { <-sem }()
-					runOne(name)
-				}()
-			}
-			wg.Wait()
-		}
-
-		sink.Emit(output.Event{Kind: output.WaveEnd, Wave: waveIdx})
+			sink.Emit(output.Event{Kind: output.NodeDone, App: name, Parents: parents, Err: runErr})
+		}(r.Name, parents)
 	}
 
-	// Any apps never started but in skipSet get reported as skipped.
-	mu.Lock()
-	seenSkipped := make(map[string]bool, len(skipped))
-	for _, n := range skipped {
-		seenSkipped[n] = true
-	}
-	for _, wave := range p.Waves {
-		for _, name := range wave {
-			if !started[name] && skipSet[name] && !seenSkipped[name] {
-				skipped = append(skipped, name)
-				seenSkipped[name] = true
-			}
-		}
-	}
-	mu.Unlock()
+	wg.Wait()
+
+	sink.Emit(output.Event{Kind: output.TreeDone})
 
 	res := Result{Succeeded: succeeded, Failed: failed, Skipped: skipped}
-
-	sink.Emit(output.Event{Kind: output.AllDone})
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return res, ctxErr
@@ -194,11 +158,11 @@ waves:
 // (i.e. apps that list it in their DependsOn). The returned map maps each
 // app to ALL transitive apps that depend on it.
 //
-// waves is only used to enumerate the set of all apps.
-func BuildDependents(waves [][]string, reverseDeps map[string][]string) map[string][]string {
+// groups is only used to enumerate the set of all apps.
+func BuildDependents(groups [][]string, reverseDeps map[string][]string) map[string][]string {
 	all := []string{}
-	for _, w := range waves {
-		all = append(all, w...)
+	for _, g := range groups {
+		all = append(all, g...)
 	}
 
 	out := make(map[string][]string, len(all))
@@ -224,29 +188,29 @@ func BuildDependents(waves [][]string, reverseDeps map[string][]string) map[stri
 	return out
 }
 
-// errMissing reports a missing job for a wave entry.
+// missingJobError reports a missing job for a plan entry.
 type missingJobError struct{ name string }
 
 func (m *missingJobError) Error() string { return "installer: no job for app " + m.name }
 
 func errMissing(name string) error { return &missingJobError{name: name} }
 
-// lineWriter buffers writes and emits one AppLine event per line.
-type lineWriter struct {
-	sink   output.Sink
-	wave   int
-	app    string
-	stream string
+// nodeLineWriter buffers writes and emits NodeLine events (tree vocabulary).
+type nodeLineWriter struct {
+	sink    output.Sink
+	app     string
+	parents []string
+	stream  string
 
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func newLineWriter(sink output.Sink, wave int, app, stream string) *lineWriter {
-	return &lineWriter{sink: sink, wave: wave, app: app, stream: stream}
+func newNodeLineWriter(sink output.Sink, app string, parents []string, stream string) *nodeLineWriter {
+	return &nodeLineWriter{sink: sink, app: app, parents: parents, stream: stream}
 }
 
-func (w *lineWriter) Write(p []byte) (int, error) {
+func (w *nodeLineWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.buf.Write(p)
@@ -257,59 +221,34 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 			break
 		}
 		line := string(data[:idx])
-		// advance past the newline
 		next := make([]byte, len(data)-idx-1)
 		copy(next, data[idx+1:])
 		w.buf.Reset()
 		w.buf.Write(next)
 		w.sink.Emit(output.Event{
-			Kind:   output.AppLine,
-			Wave:   w.wave,
-			App:    w.app,
-			Stream: w.stream,
-			Text:   line,
+			Kind:    output.NodeLine,
+			App:     w.app,
+			Parents: w.parents,
+			Stream:  w.stream,
+			Text:    line,
 		})
 	}
 	return len(p), nil
 }
 
 // Flush emits any buffered partial line.
-func (w *lineWriter) Flush() {
+func (w *nodeLineWriter) Flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.buf.Len() == 0 {
 		return
 	}
 	w.sink.Emit(output.Event{
-		Kind:   output.AppLine,
-		Wave:   w.wave,
-		App:    w.app,
-		Stream: w.stream,
-		Text:   w.buf.String(),
+		Kind:    output.NodeLine,
+		App:     w.app,
+		Parents: w.parents,
+		Stream:  w.stream,
+		Text:    w.buf.String(),
 	})
 	w.buf.Reset()
-}
-
-// TreePlan describes a tree-based install plan (as opposed to the wave-based Plan).
-type TreePlan struct {
-	// Nodes maps an app name to its direct dependencies (e.g. "app-a" → ["app-b", "app-c"])
-	Nodes map[string][]string
-	// Jobs maps app name → job.
-	Jobs map[string]AppJob
-	// Dependents maps an app name to all transitive apps that depend on it.
-	Dependents map[string][]string
-}
-
-// TreeExecutor runs a TreePlan.
-type TreeExecutor struct {
-	// Parallelism caps in-flight jobs. Values <=1 run sequentially.
-	Parallelism int
-	// Sink receives progress events. If nil, events are discarded.
-	Sink output.Sink
-}
-
-// Run executes the tree plan and returns a Result. The returned error is non-nil
-// if at least one job failed or the context was cancelled.
-func (e *TreeExecutor) Run(ctx context.Context, p TreePlan) (Result, error) {
-	panic("not implemented — see Task 7")
 }

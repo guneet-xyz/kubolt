@@ -12,18 +12,6 @@ func TestEventKindString(t *testing.T) {
 		wantUnique bool
 	}{
 		{
-			name:       "WaveStart",
-			kind:       WaveStart,
-			wantNonNil: true,
-			wantUnique: true,
-		},
-		{
-			name:       "WaveEnd",
-			kind:       WaveEnd,
-			wantNonNil: true,
-			wantUnique: true,
-		},
-		{
 			name:       "AppStart",
 			kind:       AppStart,
 			wantNonNil: true,

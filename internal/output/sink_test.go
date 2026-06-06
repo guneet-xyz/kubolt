@@ -9,8 +9,6 @@ func TestNopSink(t *testing.T) {
 	sink := NopSink{}
 
 	eventKinds := []EventKind{
-		WaveStart,
-		WaveEnd,
 		AppStart,
 		AppLine,
 		AppDone,
@@ -29,17 +27,6 @@ func TestNewLineSink_ReturnsSink(t *testing.T) {
 
 	if sink == nil {
 		t.Fatal("NewLineSink returned nil")
-	}
-
-	var _ = sink
-}
-
-func TestNewTUISink_ReturnsSink(t *testing.T) {
-	w := &bytes.Buffer{}
-	sink := NewTUISink(w)
-
-	if sink == nil {
-		t.Fatal("NewTUISink returned nil")
 	}
 
 	var _ = sink

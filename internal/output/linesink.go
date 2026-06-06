@@ -36,9 +36,6 @@ func (s *LineSink) Emit(e Event) {
 	defer s.mu.Unlock()
 
 	switch e.Kind {
-	case WaveStart:
-		// no-op: wave markers dropped in tree-based vocabulary
-
 	case AppStart:
 		s.appStart[e.App] = time.Now()
 		fmt.Fprintf(s.w, "[%s] starting\n", e.App)
@@ -65,15 +62,12 @@ func (s *LineSink) Emit(e Event) {
 	case AppSkip:
 		fmt.Fprintf(s.w, "[%s] SKIPPED: %s\n", e.App, e.Reason)
 
-	case WaveEnd:
-		// no-op: wave markers dropped in tree-based vocabulary
-
 	case AllDone:
 		fmt.Fprintf(s.w, "=== Installation complete ===\n")
 
 	case TreeStart:
-		// e.Wave carries the total app count for tree-based execution
-		fmt.Fprintf(s.w, "=== Starting (%d apps) ===\n", e.Wave)
+		// e.Count holds the total app count
+		fmt.Fprintf(s.w, "=== Starting (%d apps) ===\n", e.Count)
 
 	case NodeStart:
 		s.appStart[e.App] = time.Now()

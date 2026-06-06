@@ -77,7 +77,7 @@ func TestLineSink_NoANSI(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
-	sink.Emit(Event{Kind: TreeStart, Wave: 1})
+	sink.Emit(Event{Kind: TreeStart, Count: 1})
 	sink.Emit(Event{Kind: NodeStart, App: "testapp"})
 	sink.Emit(Event{Kind: NodeLine, App: "testapp", Text: "output line\n"})
 	sink.Emit(Event{Kind: NodeDone, App: "testapp"})
@@ -225,7 +225,7 @@ func TestLineSink_TreeFraming(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
-	sink.Emit(Event{Kind: TreeStart, Wave: 3})
+	sink.Emit(Event{Kind: TreeStart, Count: 3})
 	sink.Emit(Event{Kind: TreeDone})
 
 	output := w.String()
@@ -242,7 +242,7 @@ func TestLineSink_TreeDone_CountsAggregated(t *testing.T) {
 	w := &bytes.Buffer{}
 	sink := NewLineSink(w)
 
-	sink.Emit(Event{Kind: TreeStart, Wave: 4})
+	sink.Emit(Event{Kind: TreeStart, Count: 4})
 
 	sink.Emit(Event{Kind: NodeStart, App: "ok1"})
 	sink.Emit(Event{Kind: NodeDone, App: "ok1"})
@@ -308,22 +308,6 @@ func TestLineSink_NodeSkip(t *testing.T) {
 
 	if !strings.Contains(output, "[x] SKIPPED: dep failed") {
 		t.Errorf("expected [x] SKIPPED line, got: %q", output)
-	}
-}
-
-func TestLineSink_NoWaveMarkers(t *testing.T) {
-	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
-
-	sink.Emit(Event{Kind: WaveStart, Wave: 0})
-	sink.Emit(Event{Kind: WaveStart, Wave: 1})
-	sink.Emit(Event{Kind: WaveEnd, Wave: 0})
-	sink.Emit(Event{Kind: WaveEnd, Wave: 1})
-
-	output := w.String()
-
-	if strings.Contains(output, "=== Wave") {
-		t.Errorf("expected no Wave markers, got: %q", output)
 	}
 }
 

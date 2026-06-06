@@ -171,9 +171,9 @@ func TestBubbleSink_ConcurrentEmit(t *testing.T) {
 func TestBubbleSink_NodeLifecycleStates(t *testing.T) {
 	m := newBubbleModel()
 
-	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: TreeStart, Wave: 4}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: TreeStart, Count: 4}})
 	if m.total != 4 {
-		t.Errorf("expected total=4 from TreeStart.Wave, got %d", m.total)
+		t.Errorf("expected total=4 from TreeStart.Count, got %d", m.total)
 	}
 
 	m, startCmd := updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "alpha"}})
@@ -269,7 +269,7 @@ func TestBubbleSink_RunNonTTY(t *testing.T) {
 		runDone <- s.Run(ctx)
 	}()
 
-	s.Emit(Event{Kind: TreeStart, Wave: 2})
+	s.Emit(Event{Kind: TreeStart, Count: 2})
 	s.Emit(Event{Kind: NodeStart, App: "a"})
 	s.Emit(Event{Kind: NodeDone, App: "a"})
 	s.Emit(Event{Kind: TreeDone})

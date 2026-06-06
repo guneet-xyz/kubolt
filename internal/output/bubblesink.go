@@ -170,7 +170,7 @@ func (m bubbleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m bubbleModel) handleEvent(e Event) (tea.Model, tea.Cmd) {
 	switch e.Kind {
 	case TreeStart:
-		m.total = e.Wave
+		m.total = e.Count
 		return m, nil
 
 	case NodeReady:
@@ -438,4 +438,14 @@ func (s *BubbleTeaSink) Close() {
 		p.Quit()
 		<-s.done
 	}
+}
+
+// truncate returns a string truncated to maxLen characters, with "…" appended
+// if the original was longer. Handles multi-byte characters safely.
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-1]) + "…"
 }
