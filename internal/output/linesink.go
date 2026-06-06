@@ -13,8 +13,10 @@ import (
 type LineSink struct {
 	mu        sync.Mutex
 	w         io.Writer
-	appStart  map[string]time.Time // track elapsed per app
-	appBuf    map[string][]byte    // partial-line buffer per app
+	verbose   bool
+	appStart  map[string]time.Time   // track elapsed per app
+	appBuf    map[string][]byte      // partial-line buffer per app (legacy AppLine path / verbose NodeLine)
+	buffers   map[string]*NodeBuffer // per-node capture buffer; dumped on NodeDone failure
 	succeeded int
 	failed    int
 	skipped   int
@@ -22,11 +24,13 @@ type LineSink struct {
 
 // NewLineSink returns a Sink that writes prefixed lines to w.
 // Lines are buffered per app and flushed atomically to prevent tearing.
-func newLineSinkImpl(w io.Writer) *LineSink {
+func newLineSinkImpl(w io.Writer, verbose bool) *LineSink {
 	return &LineSink{
 		w:        w,
+		verbose:  verbose,
 		appStart: make(map[string]time.Time),
 		appBuf:   make(map[string][]byte),
+		buffers:  make(map[string]*NodeBuffer),
 	}
 }
 
@@ -71,24 +75,42 @@ func (s *LineSink) Emit(e Event) {
 
 	case NodeStart:
 		s.appStart[e.App] = time.Now()
+		if s.buffers[e.App] == nil {
+			s.buffers[e.App] = NewNodeBuffer(0)
+		}
 		fmt.Fprintf(s.w, "[%s] starting\n", e.App)
 
 	case NodeLine:
-		// Buffer partial lines per app; flush complete lines.
-		// Stage prefixes each emitted line when non-empty.
-		s.appBuf[e.App] = append(s.appBuf[e.App], []byte(e.Text)...)
-		if e.Stage != "" {
-			s.flushLinesWithStage(e.App, e.Stage)
+		if s.verbose {
+			s.appBuf[e.App] = append(s.appBuf[e.App], []byte(e.Text)...)
+			if e.Stage != "" {
+				s.flushLinesWithStage(e.App, e.Stage)
+			} else {
+				s.flushLines(e.App)
+			}
 		} else {
-			s.flushLines(e.App)
+			if s.buffers[e.App] == nil {
+				s.buffers[e.App] = NewNodeBuffer(0)
+			}
+			s.buffers[e.App].WriteLine(e.Text)
 		}
 
 	case NodeDone:
-		// Flush any remaining buffered content
 		if len(s.appBuf[e.App]) > 0 {
 			fmt.Fprintf(s.w, "[%s] %s\n", e.App, string(s.appBuf[e.App]))
 			delete(s.appBuf, e.App)
 		}
+		if e.Err != nil && !s.verbose {
+			if nb := s.buffers[e.App]; nb != nil {
+				fmt.Fprintf(s.w, "--- output from %s ---\n", e.App)
+				if t := nb.TruncatedBytes(); t > 0 {
+					fmt.Fprintf(s.w, "[... %d bytes elided due to 1 MiB cap ...]\n", t)
+				}
+				s.w.Write(nb.Bytes())
+				fmt.Fprintf(s.w, "--- end output ---\n")
+			}
+		}
+		delete(s.buffers, e.App)
 		elapsed := time.Since(s.appStart[e.App]).Truncate(time.Millisecond)
 		if e.Err != nil {
 			fmt.Fprintf(s.w, "[%s] FAILED in %s: %v\n", e.App, elapsed, e.Err)
@@ -100,6 +122,7 @@ func (s *LineSink) Emit(e Event) {
 		delete(s.appStart, e.App)
 
 	case NodeSkip:
+		delete(s.buffers, e.App)
 		fmt.Fprintf(s.w, "[%s] SKIPPED: %s\n", e.App, e.Reason)
 		s.skipped++
 

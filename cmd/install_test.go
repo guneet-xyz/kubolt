@@ -99,7 +99,7 @@ func TestInstall_WithDeps_CorrectOrder(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1, nil); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestInstall_ExistingRelease_Upgrades(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1, nil); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestInstall_ForceConflicts_Flag(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1, nil); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestInstall_DryRun(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{DryRun: true, Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "target", runner, output.NewLineSink(&buf), 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NewLineSink(&buf, true), 1, nil); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestInstall_MidChainFailure(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1)
+	err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1, nil)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -277,7 +277,7 @@ func TestInstall_AllApps_NoArg(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1, nil); err != nil {
 		t.Fatalf("installApps all: %v", err)
 	}
 
@@ -354,7 +354,7 @@ func TestInstall_Parallel_IndependentApps(t *testing.T) {
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
 	start := time.Now()
-	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 3); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 3, nil); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -402,7 +402,7 @@ func TestInstall_Parallel_DependencyOrder(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4, nil); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 
@@ -455,7 +455,7 @@ func TestInstall_ParallelismFlag_Sequential(t *testing.T) {
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
 	start := time.Now()
-	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1, nil); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -490,7 +490,7 @@ func TestInstall_Parallel_FailureSkipsDependents(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4)
+	err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4, nil)
 	if err == nil {
 		t.Fatalf("expected error when A fails")
 	}
@@ -509,5 +509,188 @@ func TestInstall_Parallel_FailureSkipsDependents(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "A") {
 		t.Errorf("error should mention failed app A; got %q", err.Error())
+	}
+}
+
+type recordingSink struct {
+	mu     sync.Mutex
+	events []output.Event
+}
+
+func (s *recordingSink) Emit(e output.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+}
+
+func (s *recordingSink) snapshot() []output.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]output.Event, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+func writeFileDepChartYAML(t *testing.T, manifestDir, app string) {
+	t.Helper()
+	chartYAML := []byte("apiVersion: v2\nname: " + app + "\nversion: 1.0.0\ndependencies:\n  - name: subchart\n    version: 1.0.0\n    repository: file://../subchart\n")
+	path := filepath.Join(manifestDir, "charts", app, "Chart.yaml")
+	if err := os.WriteFile(path, chartYAML, 0o644); err != nil {
+		t.Fatalf("write chart yaml: %v", err)
+	}
+}
+
+// TestInstallApps_DepBuildRoutesToSink guards the TUI corruption fix:
+// `helm dependency build` output MUST be routed to the sink as NodeLine
+// events (not directly to runner.Stdout / os.Stdout). If a future refactor
+// collapses runner.RunWith back to runner.Run for dep-build, an active
+// Bubble Tea TUI would be corrupted by helm's "Hang tight…" / "Saving N
+// charts" messages writing into the same terminal.
+func TestInstallApps_DepBuildRoutesToSink(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "app1", namespace: "ns1"},
+	})
+	writeFileDepChartYAML(t, m.Dir(), "app1")
+
+	stub := NewHelmStub()
+	stub.SetDepBuildOutput("Hang tight while we grab the latest from your chart repositories\nSaving 1 charts\n")
+	helm.SetExecCommand(stub.ExecFunc())
+	defer helm.ResetExecCommand()
+
+	spy := &recordingSink{}
+	var stdoutSpy bytes.Buffer
+	runner := &helm.Runner{Stdout: &stdoutSpy, Stderr: &stdoutSpy}
+
+	if err := installApps(context.Background(), m, "app1", runner, spy, 1, nil); err != nil {
+		t.Fatalf("installApps: %v", err)
+	}
+
+	events := spy.snapshot()
+
+	var depBuildLines []string
+	for _, e := range events {
+		if e.Kind == output.NodeLine && e.App == "app1" && e.Stream == "helm" {
+			depBuildLines = append(depBuildLines, e.Text)
+		}
+	}
+	if len(depBuildLines) == 0 {
+		t.Fatalf("expected NodeLine events with stream=helm from dep-build; got events=%v", events)
+	}
+	var foundHangTight bool
+	for _, line := range depBuildLines {
+		if strings.Contains(line, "Hang tight") {
+			foundHangTight = true
+			break
+		}
+	}
+	if !foundHangTight {
+		t.Errorf("expected 'Hang tight' in NodeLine events; got %v", depBuildLines)
+	}
+
+	if strings.Contains(stdoutSpy.String(), "Hang tight") || strings.Contains(stdoutSpy.String(), "Saving") {
+		t.Errorf("dep-build output leaked to runner.Stdout (would corrupt active TUI); got %q", stdoutSpy.String())
+	}
+
+	var sawStart, sawDoneOK bool
+	for _, e := range events {
+		if e.App != "app1" {
+			continue
+		}
+		if e.Kind == output.NodeStart && e.Stream == "" && e.Text == "" {
+			sawStart = true
+		}
+		if e.Kind == output.NodeDone && e.Err == nil {
+			sawDoneOK = true
+		}
+	}
+	if !sawStart {
+		t.Errorf("expected NodeStart for app1 (dep-build phase); got events=%v", events)
+	}
+	if !sawDoneOK {
+		t.Errorf("expected successful NodeDone for app1 (dep-build phase); got events=%v", events)
+	}
+}
+
+// TestInstallApps_DepBuildError verifies that a failed dep-build returns a
+// non-nil error AND emits NodeDone with err != nil before propagating.
+func TestInstallApps_DepBuildError(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "app1", namespace: "ns1"},
+	})
+	writeFileDepChartYAML(t, m.Dir(), "app1")
+
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		if len(args) >= 1 && args[0] == "dependency" {
+			return exec.Command("false")
+		}
+		if len(args) >= 1 && args[0] == "list" {
+			return exec.Command("echo", "[]")
+		}
+		return exec.Command("true")
+	})
+	defer helm.ResetExecCommand()
+
+	spy := &recordingSink{}
+	var stdoutSpy bytes.Buffer
+	runner := &helm.Runner{Stdout: &stdoutSpy, Stderr: &stdoutSpy}
+
+	err := installApps(context.Background(), m, "app1", runner, spy, 1, nil)
+	if err == nil {
+		t.Fatalf("expected error from failed dep-build, got nil")
+	}
+	if !strings.Contains(err.Error(), "dependency build for app1") {
+		t.Errorf("error should mention dependency build for app1; got %v", err)
+	}
+
+	var sawDoneWithErr bool
+	for _, e := range spy.snapshot() {
+		if e.Kind == output.NodeDone && e.App == "app1" && e.Err != nil {
+			sawDoneWithErr = true
+			break
+		}
+	}
+	if !sawDoneWithErr {
+		t.Errorf("expected NodeDone with non-nil Err for app1 dep-build failure; got events=%v", spy.snapshot())
+	}
+}
+
+// TestInstallApps_DepBuild_TUIBuffer verifies that when depBuildFailOut is
+// non-nil (TUI mode), helm dep-build output is mirrored into the buffer for
+// post-Close replay AND still routed through the sink.
+func TestInstallApps_DepBuild_TUIBuffer(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "app1", namespace: "ns1"},
+	})
+	writeFileDepChartYAML(t, m.Dir(), "app1")
+
+	stub := NewHelmStub()
+	stub.SetDepBuildOutput("Hang tight while we grab the latest from your chart repositories\nSaving 1 charts\n")
+	helm.SetExecCommand(stub.ExecFunc())
+	defer helm.ResetExecCommand()
+
+	spy := &recordingSink{}
+	var stdoutSpy bytes.Buffer
+	var depBuildBuf bytes.Buffer
+	runner := &helm.Runner{Stdout: &stdoutSpy, Stderr: &stdoutSpy}
+
+	if err := installApps(context.Background(), m, "app1", runner, spy, 1, &depBuildBuf); err != nil {
+		t.Fatalf("installApps: %v", err)
+	}
+
+	if !strings.Contains(depBuildBuf.String(), "Hang tight") {
+		t.Errorf("expected dep-build output in depBuildFailOut buffer; got %q", depBuildBuf.String())
+	}
+	if strings.Contains(stdoutSpy.String(), "Hang tight") {
+		t.Errorf("dep-build output must NOT leak to runner.Stdout; got %q", stdoutSpy.String())
+	}
+	var sawNodeLine bool
+	for _, e := range spy.snapshot() {
+		if e.Kind == output.NodeLine && e.App == "app1" && strings.Contains(e.Text, "Hang tight") {
+			sawNodeLine = true
+			break
+		}
+	}
+	if !sawNodeLine {
+		t.Errorf("expected NodeLine event for dep-build line; got events=%v", spy.snapshot())
 	}
 }

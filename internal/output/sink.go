@@ -81,6 +81,6 @@ func (NopSink) Emit(Event) {}
 
 // NewLineSink returns a Sink that writes prefixed lines to w.
 // Real implementation is in linesink.go.
-func NewLineSink(w io.Writer) Sink {
-	return newLineSinkImpl(w)
+func NewLineSink(w io.Writer, verbose bool) Sink {
+	return newLineSinkImpl(w, verbose)
 }

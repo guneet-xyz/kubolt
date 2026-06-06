@@ -249,7 +249,7 @@ func TestBackupWithSink_PlainMode(t *testing.T) {
 	}
 
 	sink := &recordSink{}
-	if err := runBackupWithHost(selected, t.TempDir(), "testhost", false, sink); err != nil {
+	if _, err := runBackupWithHost(selected, t.TempDir(), "testhost", false, sink); err != nil {
 		t.Fatalf("runBackupWithHost: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestBackupWithSink_NilSink(t *testing.T) {
 		t.Fatalf("selectApps: %v", err)
 	}
 
-	if err := runBackupWithHost(selected, t.TempDir(), "testhost", false, output.NopSink{}); err != nil {
+	if _, err := runBackupWithHost(selected, t.TempDir(), "testhost", false, output.NopSink{}); err != nil {
 		t.Fatalf("runBackupWithHost with NopSink: %v", err)
 	}
 }

@@ -4,7 +4,6 @@
 package installer
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"strings"
@@ -117,8 +116,8 @@ func (e *Executor) Run(ctx context.Context, p Plan) (Result, error) {
 
 			sink.Emit(output.Event{Kind: output.NodeStart, App: name, Parents: parents})
 
-			stdout := newNodeLineWriter(sink, name, parents, "stdout")
-			stderr := newNodeLineWriter(sink, name, parents, "stderr")
+			stdout := output.NewNodeLineWriter(sink, name, parents, "stdout")
+			stderr := output.NewNodeLineWriter(sink, name, parents, "stderr")
 
 			runErr := job.Run(ctx, stdout, stderr)
 			stdout.Flush()
@@ -194,61 +193,3 @@ type missingJobError struct{ name string }
 func (m *missingJobError) Error() string { return "installer: no job for app " + m.name }
 
 func errMissing(name string) error { return &missingJobError{name: name} }
-
-// nodeLineWriter buffers writes and emits NodeLine events (tree vocabulary).
-type nodeLineWriter struct {
-	sink    output.Sink
-	app     string
-	parents []string
-	stream  string
-
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func newNodeLineWriter(sink output.Sink, app string, parents []string, stream string) *nodeLineWriter {
-	return &nodeLineWriter{sink: sink, app: app, parents: parents, stream: stream}
-}
-
-func (w *nodeLineWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.buf.Write(p)
-	for {
-		data := w.buf.Bytes()
-		idx := bytes.IndexByte(data, '\n')
-		if idx < 0 {
-			break
-		}
-		line := string(data[:idx])
-		next := make([]byte, len(data)-idx-1)
-		copy(next, data[idx+1:])
-		w.buf.Reset()
-		w.buf.Write(next)
-		w.sink.Emit(output.Event{
-			Kind:    output.NodeLine,
-			App:     w.app,
-			Parents: w.parents,
-			Stream:  w.stream,
-			Text:    line,
-		})
-	}
-	return len(p), nil
-}
-
-// Flush emits any buffered partial line.
-func (w *nodeLineWriter) Flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.buf.Len() == 0 {
-		return
-	}
-	w.sink.Emit(output.Event{
-		Kind:    output.NodeLine,
-		App:     w.app,
-		Parents: w.parents,
-		Stream:  w.stream,
-		Text:    w.buf.String(),
-	})
-	w.buf.Reset()
-}

@@ -67,7 +67,7 @@ func (s *pgDumpStrategy) Backup(ctx context.Context, app manifest.App, target ma
 	// Build the pg_dump command, streaming stdout directly to the partial file.
 	cmd := execCommand("kubectl", "exec", "-n", app.Namespace, pod, "--", "sh", "-c", pgDumpEnvScript, "--", db)
 	cmd.Stdout = f
-	cmd.Stderr = b.Stderr
+	cmd.Stderr = b.outStderr()
 
 	if err := cmd.Start(); err != nil {
 		_ = f.Close()

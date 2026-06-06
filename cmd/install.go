@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -74,7 +75,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		Stderr: Stderr,
 	}
 
-	// Serial plugin install (not concurrency-safe; shared helm plugin dir).
+	// pre-sink: safe to write stdout. The plugin install runs serially before
+	// the Bubble Tea TUI is started, so direct stdout writes here cannot
+	// corrupt the rendered tree.
 	pluginDir := filepath.Join(m.Dir(), "plugins", "obscuro")
 	if _, err := os.Stat(filepath.Join(pluginDir, "plugin.yaml")); err == nil {
 		if err := helm.EnsurePlugin(runner, "obscuro", pluginDir); err != nil {
@@ -99,22 +102,38 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	var sink output.Sink
 	var bubbleSink *output.BubbleTeaSink
+	verbose, _ := cmd.Flags().GetBool("verbose")
 	switch resolveOutputMode(cmd, Stdout) {
 	case OutputModeTUI:
 		bubbleSink = output.NewBubbleTeaSink(Stdout)
 		sink = bubbleSink
 	default:
-		sink = output.NewLineSink(Stdout)
+		sink = output.NewLineSink(Stdout, verbose)
 	}
 
 	if bubbleSink != nil {
 		go func() { _ = bubbleSink.Run(ctx) }()
 	}
 
-	runErr := installApps(ctx, m, target, runner, sink, parallelism)
+	// When the BubbleTeaSink owns the terminal, dep-build NodeLine events are
+	// silently dropped (the apps are not yet registered in the tree, which
+	// only happens at TreeStart inside installer.Executor). Capture dep-build
+	// helm output to a buffer so it can be replayed to stdout AFTER the TUI
+	// closes, instead of letting helm write to os.Stdout directly during the
+	// TUI lifetime (which would corrupt the rendered tree).
+	var depBuildBuf bytes.Buffer
+	var depBuildOut io.Writer
+	if bubbleSink != nil {
+		depBuildOut = &depBuildBuf
+	}
+
+	runErr := installApps(ctx, m, target, runner, sink, parallelism, depBuildOut)
 
 	if bubbleSink != nil {
 		bubbleSink.Close()
+		if depBuildBuf.Len() > 0 {
+			_, _ = Stdout.Write(depBuildBuf.Bytes())
+		}
 	}
 
 	return runErr
@@ -124,7 +143,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 // app in dependency order using the tree-based installer.Executor. When
 // target is "", every app in the manifest is installed. Pure helm/manifest
 // logic — no preflight, no TTY detection — so it is directly testable.
-func installApps(ctx context.Context, m *manifest.Manifest, target string, runner *helm.Runner, sink output.Sink, parallelism int) error {
+//
+// depBuildFailOut, if non-nil, receives a copy of every byte produced by the
+// serial `helm dependency build` step. Callers running an interactive TUI
+// pass a buffer here so dep-build output can be replayed to stdout after the
+// TUI exits, since BubbleTeaSink drops NodeLine events for apps not yet in
+// its tree (apps are registered at TreeStart, which fires inside the
+// executor — long after the dep-build loop has completed).
+func installApps(ctx context.Context, m *manifest.Manifest, target string, runner *helm.Runner, sink output.Sink, parallelism int, depBuildFailOut io.Writer) error {
 	if sink == nil {
 		sink = output.NopSink{}
 	}
@@ -165,14 +191,28 @@ func installApps(ctx context.Context, m *manifest.Manifest, target string, runne
 
 	// `helm dependency build` mutates a shared chart cache and is not
 	// concurrency-safe, so it must run serially before any parallel installs.
+	// Output is routed through the sink as NodeLine events (NEVER directly
+	// to runner.Stdout) so an active Bubble Tea TUI is not corrupted.
 	manifestDir := m.Dir()
 	for _, name := range appsToInstall {
 		app, _ := m.AppByName(name)
 		chartPath := filepath.Join(manifestDir, app.ChartPath)
-		if hasFileDependency(chartPath) {
-			if err := runner.Run(helm.BuildDependencyBuild(chartPath)); err != nil {
-				return fmt.Errorf("dependency build for %s: %w", name, err)
-			}
+		if !hasFileDependency(chartPath) {
+			continue
+		}
+
+		nlw := output.NewNodeLineWriter(sink, name, nil, "helm")
+		var eff io.Writer = nlw
+		if depBuildFailOut != nil {
+			eff = io.MultiWriter(nlw, depBuildFailOut)
+		}
+
+		sink.Emit(output.Event{Kind: output.NodeStart, App: name})
+		runErr := runner.RunWith(ctx, helm.BuildDependencyBuild(chartPath), eff, eff)
+		nlw.Flush()
+		sink.Emit(output.Event{Kind: output.NodeDone, App: name, Err: runErr})
+		if runErr != nil {
+			return fmt.Errorf("dependency build for %s: %w", name, runErr)
 		}
 	}
 

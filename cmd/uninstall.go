@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/guneet-xyz/kubolt/internal/helm"
@@ -70,12 +68,13 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	var sink output.Sink
 	var bubbleSink *output.BubbleTeaSink
+	verbose, _ := cmd.Flags().GetBool("verbose")
 	switch resolveOutputMode(cmd, Stdout) {
 	case OutputModeTUI:
 		bubbleSink = output.NewBubbleTeaSink(Stdout)
 		sink = bubbleSink
 	default:
-		sink = output.NewLineSink(Stdout)
+		sink = output.NewLineSink(Stdout, verbose)
 	}
 
 	if bubbleSink != nil {
@@ -167,80 +166,15 @@ func uninstallAppWithSink(ctx context.Context, m *manifest.Manifest, target stri
 	sink.Emit(output.Event{Kind: output.NodeReady, App: target})
 	sink.Emit(output.Event{Kind: output.NodeStart, App: target})
 
-	stdout := newUninstallLineWriter(sink, target, "stdout")
-	stderr := newUninstallLineWriter(sink, target, "stderr")
+	stdout := output.NewNodeLineWriter(sink, target, nil, "stdout")
+	stderr := output.NewNodeLineWriter(sink, target, nil, "stderr")
 
 	err := runner.RunWith(ctx, helm.BuildUninstall(target, app.Namespace), stdout, stderr)
-	stdout.flush()
-	stderr.flush()
+	stdout.Flush()
+	stderr.Flush()
 
 	sink.Emit(output.Event{Kind: output.NodeDone, App: target, Err: err})
 	sink.Emit(output.Event{Kind: output.TreeDone})
 
 	return err
-}
-
-// uninstallLineWriter buffers writes and emits NodeLine events per line.
-// The mutex protects the buffer; sink.Emit is invoked outside the lock so a
-// blocking sink cannot deadlock writers feeding the same writer concurrently.
-type uninstallLineWriter struct {
-	sink   output.Sink
-	app    string
-	stream string
-
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func newUninstallLineWriter(sink output.Sink, app, stream string) *uninstallLineWriter {
-	return &uninstallLineWriter{sink: sink, app: app, stream: stream}
-}
-
-func (w *uninstallLineWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	w.buf.Write(p)
-	var lines []string
-	for {
-		data := w.buf.Bytes()
-		idx := bytes.IndexByte(data, '\n')
-		if idx < 0 {
-			break
-		}
-		line := string(data[:idx])
-		next := make([]byte, len(data)-idx-1)
-		copy(next, data[idx+1:])
-		w.buf.Reset()
-		w.buf.Write(next)
-		lines = append(lines, line)
-	}
-	w.mu.Unlock()
-
-	for _, line := range lines {
-		w.sink.Emit(output.Event{
-			Kind:   output.NodeLine,
-			App:    w.app,
-			Stream: w.stream,
-			Text:   line,
-		})
-	}
-	return len(p), nil
-}
-
-// flush emits any buffered partial line.
-func (w *uninstallLineWriter) flush() {
-	w.mu.Lock()
-	if w.buf.Len() == 0 {
-		w.mu.Unlock()
-		return
-	}
-	text := w.buf.String()
-	w.buf.Reset()
-	w.mu.Unlock()
-
-	w.sink.Emit(output.Event{
-		Kind:   output.NodeLine,
-		App:    w.app,
-		Stream: w.stream,
-		Text:   text,
-	})
 }

@@ -326,3 +326,62 @@ func TestUninstallWithSink_NilSink(t *testing.T) {
 		t.Fatalf("uninstallAppWithSink with nil sink: %v", err)
 	}
 }
+
+// TestUninstallWithSink_HelmOutputRoutesToSink guards the TUI corruption fix:
+// `helm uninstall` output MUST be routed to the sink as NodeLine events (not
+// directly to runner.Stdout / os.Stdout). If a future refactor collapses
+// runner.RunWith back to runner.Run for uninstall, an active Bubble Tea TUI
+// would be corrupted by helm's "release ... uninstalled" message writing into
+// the same terminal.
+func TestUninstallWithSink_HelmOutputRoutesToSink(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "target", namespace: "ns-target"},
+	})
+
+	const helmMsg = `release "target" uninstalled`
+	helm.SetExecCommand(func(name string, args ...string) *exec.Cmd {
+		if name == "helm" && len(args) >= 1 && args[0] == "uninstall" {
+			return exec.Command("echo", helmMsg)
+		}
+		return exec.Command("echo", "[]")
+	})
+	defer helm.ResetExecCommand()
+
+	var stdoutSpy bytes.Buffer
+	runner := &helm.Runner{Stdout: &stdoutSpy, Stderr: &stdoutSpy}
+
+	sink := &recordSink{}
+	if err := uninstallAppWithSink(context.Background(), m, "target", runner, sink); err != nil {
+		t.Fatalf("uninstallAppWithSink: %v", err)
+	}
+
+	// Helm output must NOT leak to runner.Stdout (which would corrupt an
+	// active TUI). The runner's stdout/stderr should be untouched during
+	// the helm uninstall call because RunWith routes through per-call
+	// writers.
+	if got := stdoutSpy.String(); strings.Contains(got, "uninstalled") {
+		t.Errorf("helm uninstall output leaked to runner.Stdout (would corrupt active TUI); got %q", got)
+	}
+
+	// Sink must have received NodeLine events for the helm output, tagged
+	// with the app name.
+	events := sink.snapshot()
+	var sawNodeLine bool
+	for _, e := range events {
+		if e.Kind != output.NodeLine {
+			continue
+		}
+		if e.App != "target" {
+			t.Errorf("NodeLine event has App=%q, want %q", e.App, "target")
+		}
+		if e.Stream != "stdout" && e.Stream != "stderr" {
+			t.Errorf("NodeLine event has Stream=%q, want stdout or stderr", e.Stream)
+		}
+		if strings.Contains(e.Text, "uninstalled") {
+			sawNodeLine = true
+		}
+	}
+	if !sawNodeLine {
+		t.Errorf("expected NodeLine event containing 'uninstalled' from helm output; got events=%v", events)
+	}
+}

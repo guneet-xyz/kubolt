@@ -11,7 +11,7 @@ import (
 
 func TestLineSink_BasicOutput(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: AppStart, App: "app1"})
 	sink.Emit(Event{Kind: AppLine, App: "app1", Text: "hello\nworld\n"})
@@ -35,7 +35,7 @@ func TestLineSink_BasicOutput(t *testing.T) {
 
 func TestLineSink_NoTearing(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	var wg sync.WaitGroup
 	numGoroutines := 10
@@ -75,7 +75,7 @@ func TestLineSink_NoTearing(t *testing.T) {
 
 func TestLineSink_NoANSI(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: TreeStart, Count: 1})
 	sink.Emit(Event{Kind: NodeStart, App: "testapp"})
@@ -92,7 +92,7 @@ func TestLineSink_NoANSI(t *testing.T) {
 
 func TestLineSink_PartialLine_FlushedOnDone(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: AppStart, App: "app1"})
 	sink.Emit(Event{Kind: AppLine, App: "app1", Text: "partial line without newline"})
@@ -107,7 +107,7 @@ func TestLineSink_PartialLine_FlushedOnDone(t *testing.T) {
 
 func TestLineSink_SkippedApp(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{
 		Kind:   AppSkip,
@@ -127,7 +127,7 @@ func TestLineSink_SkippedApp(t *testing.T) {
 
 func TestLineSink_AppFailure(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: AppStart, App: "failing-app"})
 	sink.Emit(Event{Kind: AppLine, App: "failing-app", Text: "error occurred\n"})
@@ -149,7 +149,7 @@ func TestLineSink_AppFailure(t *testing.T) {
 
 func TestLineSink_AllDone(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: AllDone})
 
@@ -162,7 +162,7 @@ func TestLineSink_AllDone(t *testing.T) {
 
 func TestLineSink_ConcurrentEmit(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -206,7 +206,7 @@ func TestLineSink_ConcurrentEmit(t *testing.T) {
 
 func TestLineSink_EmptyApp(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: AppStart, App: "silent-app"})
 	sink.Emit(Event{Kind: AppDone, App: "silent-app"})
@@ -223,7 +223,7 @@ func TestLineSink_EmptyApp(t *testing.T) {
 
 func TestLineSink_TreeFraming(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: TreeStart, Count: 3})
 	sink.Emit(Event{Kind: TreeDone})
@@ -240,7 +240,7 @@ func TestLineSink_TreeFraming(t *testing.T) {
 
 func TestLineSink_TreeDone_CountsAggregated(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: TreeStart, Count: 4})
 
@@ -266,7 +266,7 @@ func TestLineSink_TreeDone_CountsAggregated(t *testing.T) {
 
 func TestLineSink_NodeStartDone_OK(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: NodeStart, App: "x"})
 	sink.Emit(Event{Kind: NodeDone, App: "x"})
@@ -283,7 +283,7 @@ func TestLineSink_NodeStartDone_OK(t *testing.T) {
 
 func TestLineSink_NodeDone_Failed(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: NodeStart, App: "x"})
 	sink.Emit(Event{Kind: NodeDone, App: "x", Err: errors.New("boom")})
@@ -300,7 +300,7 @@ func TestLineSink_NodeDone_Failed(t *testing.T) {
 
 func TestLineSink_NodeSkip(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, false)
 
 	sink.Emit(Event{Kind: NodeSkip, App: "x", Reason: "dep failed"})
 
@@ -311,9 +311,9 @@ func TestLineSink_NodeSkip(t *testing.T) {
 	}
 }
 
-func TestLineSink_NodeLineWithStage(t *testing.T) {
+func TestLineSink_NodeLineWithStage_Verbose(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, true)
 
 	sink.Emit(Event{Kind: NodeStart, App: "x"})
 	sink.Emit(Event{Kind: NodeLine, App: "x", Text: "step1\n", Stage: "scaling-down"})
@@ -325,9 +325,9 @@ func TestLineSink_NodeLineWithStage(t *testing.T) {
 	}
 }
 
-func TestLineSink_PartialLineBuffering(t *testing.T) {
+func TestLineSink_PartialLineBuffering_Verbose(t *testing.T) {
 	w := &bytes.Buffer{}
-	sink := NewLineSink(w)
+	sink := NewLineSink(w, true)
 
 	sink.Emit(Event{Kind: NodeStart, App: "x"})
 	sink.Emit(Event{Kind: NodeLine, App: "x", Text: "hel"})
@@ -345,5 +345,189 @@ func TestLineSink_PartialLineBuffering(t *testing.T) {
 	}
 	if strings.Contains(output, "[x] hel\n") {
 		t.Errorf("partial chunk should not have produced its own line, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLine_VerboseStreamsLive(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w, true)
+
+	sink.Emit(Event{Kind: NodeStart, App: "v"})
+	sink.Emit(Event{Kind: NodeLine, App: "v", Text: "live-line\n"})
+
+	if !strings.Contains(w.String(), "[v] live-line") {
+		t.Errorf("verbose mode must stream live, got: %q", w.String())
+	}
+
+	sink.Emit(Event{Kind: NodeDone, App: "v"})
+
+	output := w.String()
+	if strings.Contains(output, "--- output from") {
+		t.Errorf("verbose mode must not dump buffer, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLine_NonVerboseSuccess_NoOutput(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w, false)
+
+	sink.Emit(Event{Kind: NodeStart, App: "q"})
+	before := w.Len()
+	sink.Emit(Event{Kind: NodeLine, App: "q", Text: "secret-line"})
+	sink.Emit(Event{Kind: NodeLine, App: "q", Text: "another"})
+	if w.Len() != before {
+		t.Errorf("non-verbose NodeLine must not write between NodeStart and NodeDone, got: %q", w.String()[before:])
+	}
+	sink.Emit(Event{Kind: NodeDone, App: "q"})
+
+	output := w.String()
+	if strings.Contains(output, "secret-line") || strings.Contains(output, "another") {
+		t.Errorf("non-verbose success must not dump buffered output, got: %q", output)
+	}
+	if strings.Contains(output, "--- output from") {
+		t.Errorf("success must not emit dump markers, got: %q", output)
+	}
+	if !strings.Contains(output, "[q] OK in") {
+		t.Errorf("expected [q] OK summary line, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLine_NonVerboseFailure_DumpsBuffer(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w, false)
+
+	sink.Emit(Event{Kind: NodeStart, App: "f"})
+	sink.Emit(Event{Kind: NodeLine, App: "f", Text: "first"})
+	sink.Emit(Event{Kind: NodeLine, App: "f", Text: "second"})
+	sink.Emit(Event{Kind: NodeDone, App: "f", Err: errors.New("boom")})
+
+	output := w.String()
+
+	startMarker := "--- output from f ---\n"
+	endMarker := "--- end output ---\n"
+	startIdx := strings.Index(output, startMarker)
+	endIdx := strings.Index(output, endMarker)
+	if startIdx < 0 {
+		t.Fatalf("expected start marker, got: %q", output)
+	}
+	if endIdx < 0 {
+		t.Fatalf("expected end marker, got: %q", output)
+	}
+	if endIdx <= startIdx {
+		t.Fatalf("end marker must follow start marker, got: %q", output)
+	}
+
+	body := output[startIdx+len(startMarker) : endIdx]
+	if body != "first\nsecond\n" {
+		t.Errorf("expected body %q, got %q", "first\nsecond\n", body)
+	}
+
+	failedIdx := strings.Index(output, "[f] FAILED in")
+	if failedIdx < 0 {
+		t.Errorf("expected FAILED summary line, got: %q", output)
+	}
+	if failedIdx <= endIdx {
+		t.Errorf("FAILED summary must follow end marker, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLine_NonVerboseFailure_TruncationMarker(t *testing.T) {
+	w := &bytes.Buffer{}
+	s := newLineSinkImpl(w, false)
+
+	s.Emit(Event{Kind: NodeStart, App: "t"})
+	s.mu.Lock()
+	s.buffers["t"] = NewNodeBuffer(8)
+	s.mu.Unlock()
+
+	s.Emit(Event{Kind: NodeLine, App: "t", Text: "abcdef"})
+	s.Emit(Event{Kind: NodeLine, App: "t", Text: "ghijkl"})
+	s.Emit(Event{Kind: NodeDone, App: "t", Err: errors.New("oops")})
+
+	output := w.String()
+
+	if !strings.Contains(output, "[... ") || !strings.Contains(output, "bytes elided due to 1 MiB cap ...]") {
+		t.Errorf("expected truncation marker, got: %q", output)
+	}
+
+	truncIdx := strings.Index(output, "[... ")
+	startIdx := strings.Index(output, "--- output from t ---\n")
+	if startIdx < 0 || truncIdx <= startIdx {
+		t.Errorf("truncation marker must come after start marker, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeLine_TwoNodesInterleaved_OnlyFailingDumps(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w, false)
+
+	sink.Emit(Event{Kind: NodeStart, App: "ok"})
+	sink.Emit(Event{Kind: NodeStart, App: "bad"})
+	sink.Emit(Event{Kind: NodeLine, App: "ok", Text: "ok-line"})
+	sink.Emit(Event{Kind: NodeLine, App: "bad", Text: "bad-line"})
+	sink.Emit(Event{Kind: NodeDone, App: "ok"})
+	sink.Emit(Event{Kind: NodeDone, App: "bad", Err: errors.New("nope")})
+
+	output := w.String()
+
+	if strings.Contains(output, "ok-line") {
+		t.Errorf("ok node's buffer must not appear, got: %q", output)
+	}
+	if !strings.Contains(output, "bad-line") {
+		t.Errorf("failing node's buffer must appear, got: %q", output)
+	}
+	if !strings.Contains(output, "--- output from bad ---") {
+		t.Errorf("expected dump for failing node, got: %q", output)
+	}
+	if strings.Contains(output, "--- output from ok ---") {
+		t.Errorf("ok node must not produce dump markers, got: %q", output)
+	}
+}
+
+func TestLineSink_NodeSkip_NoDump(t *testing.T) {
+	w := &bytes.Buffer{}
+	sink := NewLineSink(w, false)
+
+	sink.Emit(Event{Kind: NodeStart, App: "s"})
+	sink.Emit(Event{Kind: NodeLine, App: "s", Text: "buffered-but-skipped"})
+	sink.Emit(Event{Kind: NodeSkip, App: "s", Reason: "dep failed"})
+
+	output := w.String()
+
+	if strings.Contains(output, "buffered-but-skipped") {
+		t.Errorf("skipped node must not dump buffer, got: %q", output)
+	}
+	if strings.Contains(output, "--- output from") {
+		t.Errorf("skipped node must not emit dump markers, got: %q", output)
+	}
+	if !strings.Contains(output, "[s] SKIPPED: dep failed") {
+		t.Errorf("expected skip line, got: %q", output)
+	}
+}
+
+func TestLineSink_BufferDeletedAfterNodeDone(t *testing.T) {
+	w := &bytes.Buffer{}
+	s := newLineSinkImpl(w, false)
+
+	s.Emit(Event{Kind: NodeStart, App: "leak"})
+	s.Emit(Event{Kind: NodeLine, App: "leak", Text: "data"})
+	s.Emit(Event{Kind: NodeDone, App: "leak"})
+
+	s.mu.Lock()
+	_, exists := s.buffers["leak"]
+	s.mu.Unlock()
+	if exists {
+		t.Errorf("buffer for completed node must be deleted")
+	}
+
+	s.Emit(Event{Kind: NodeStart, App: "leak2"})
+	s.Emit(Event{Kind: NodeLine, App: "leak2", Text: "data"})
+	s.Emit(Event{Kind: NodeDone, App: "leak2", Err: errors.New("x")})
+
+	s.mu.Lock()
+	_, exists = s.buffers["leak2"]
+	s.mu.Unlock()
+	if exists {
+		t.Errorf("buffer for failed node must be deleted after dump")
 	}
 }

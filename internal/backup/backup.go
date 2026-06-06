@@ -29,8 +29,13 @@ type Backuper struct {
 	SSHHost   string
 	RemoteTmp string
 	DryRun    bool
-	Stdout    io.Writer
-	Stderr    io.Writer
+	// Stdout/Stderr are used ONLY for pre-sink writes (e.g. dry-run preview)
+	// or post-Close writes drained by the caller (e.g. cleanup warnings,
+	// "Backup complete" message). While a Sink is active and per-app writers
+	// are bound, all subprocess output is routed through NodeLineWriter or
+	// io.Discard — never to these writers — to avoid corrupting a TUI.
+	Stdout io.Writer
+	Stderr io.Writer
 
 	// nowFn is used to generate the timestamp directory. Defaults to time.Now.
 	// Exposed for deterministic tests.
@@ -38,6 +43,28 @@ type Backuper struct {
 
 	// Sink receives progress events per app. If nil, no events are emitted.
 	Sink output.Sink
+
+	// LocalDir is set on successful completion of BackupApps to the resolved
+	// timestamped output directory (e.g. "./backups/2026-01-02_150405").
+	// Callers drain this after closing the sink to print a summary line
+	// without corrupting an active TUI.
+	LocalDir string
+
+	// Warnings collects non-fatal warnings produced during BackupApps while
+	// a sink is active (which can't safely write to stderr without corrupting
+	// the TUI). Callers drain this after closing the sink and emit each
+	// entry to stderr. When no sink is active, warnings are written directly
+	// to b.Stderr at the moment they occur.
+	Warnings []string
+
+	// currentStdout/currentStderr are per-app subprocess writers, set by
+	// BackupApps before each app and cleared after. When set, runCmd /
+	// captureCmd route subprocess output here (typically NodeLineWriter
+	// instances bound to the active app). When nil, outStdout/outStderr
+	// fall back to b.Stdout/b.Stderr — or to io.Discard when a Sink is
+	// active to prevent TUI corruption from cluster-level commands.
+	currentStdout io.Writer
+	currentStderr io.Writer
 }
 
 // emit forwards an event to the configured Sink, no-op when Sink is nil.
@@ -45,6 +72,43 @@ func (b *Backuper) emit(e output.Event) {
 	if b.Sink != nil {
 		b.Sink.Emit(e)
 	}
+}
+
+// outStdout returns the writer to use for subprocess stdout.
+// Priority: per-app writer > io.Discard (when sink active, cluster-level call) > b.Stdout.
+func (b *Backuper) outStdout() io.Writer {
+	if b.currentStdout != nil {
+		return b.currentStdout
+	}
+	if b.Sink != nil {
+		// A sink owns the terminal; cluster-level subprocess output (e.g.
+		// scp, top-level mkdir) is dropped to avoid TUI corruption.
+		return io.Discard
+	}
+	return b.Stdout
+}
+
+// outStderr is the stderr counterpart of outStdout.
+func (b *Backuper) outStderr() io.Writer {
+	if b.currentStderr != nil {
+		return b.currentStderr
+	}
+	if b.Sink != nil {
+		return io.Discard
+	}
+	return b.Stderr
+}
+
+// addWarning records a non-fatal warning. With a sink active, the warning is
+// buffered for the caller to drain post-Close; otherwise it is written to
+// b.Stderr immediately.
+func (b *Backuper) addWarning(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if b.Sink != nil {
+		b.Warnings = append(b.Warnings, msg)
+		return
+	}
+	fmt.Fprintln(b.Stderr, msg)
 }
 
 // BackupApps backs up all configured targets for the given apps into
@@ -79,6 +143,8 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 	defer b.emit(output.Event{Kind: output.TreeDone})
 
 	// Dry-run: print plans for all targets across all apps.
+	// dry-run is gated to LineSink/NopSink in cmd/backup.go (see runBackup),
+	// so direct b.Stdout writes here cannot corrupt a TUI alt-screen.
 	if b.DryRun {
 		fmt.Fprintf(b.Stdout, "[dry-run] mkdir -p %s\n", localTs)
 		if needsRemote {
@@ -139,7 +205,25 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 			continue
 		}
 		b.emit(output.Event{Kind: output.NodeStart, App: app.Name})
+
+		var stdoutFlush, stderrFlush func()
+		if b.Sink != nil {
+			nlwOut := output.NewNodeLineWriter(b.Sink, app.Name, nil, "stdout")
+			nlwErr := output.NewNodeLineWriter(b.Sink, app.Name, nil, "stderr")
+			b.currentStdout, b.currentStderr = nlwOut, nlwErr
+			stdoutFlush, stderrFlush = nlwOut.Flush, nlwErr.Flush
+		}
+
 		err := b.backupAppTargets(ctx, app, localTs, remoteTsDir)
+
+		if stdoutFlush != nil {
+			stdoutFlush()
+		}
+		if stderrFlush != nil {
+			stderrFlush()
+		}
+		b.currentStdout, b.currentStderr = nil, nil
+
 		b.emit(output.Event{Kind: output.NodeDone, App: app.Name, Err: err})
 		if err != nil {
 			return err
@@ -153,11 +237,11 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 			return fmt.Errorf("scp from remote: %w", err)
 		}
 		if err := b.runSSH(fmt.Sprintf("rm -rf %s", remoteTsDir)); err != nil {
-			fmt.Fprintf(b.Stderr, "warning: failed to clean remote tmp: %v\n", err)
+			b.addWarning("warning: failed to clean remote tmp: %v", err)
 		}
 	}
 
-	fmt.Fprintf(b.Stdout, "==> Backup complete: %s\n", localTs)
+	b.LocalDir = localTs
 	return nil
 }
 
@@ -235,14 +319,14 @@ func (b *Backuper) runSSH(cmd string) error {
 
 func (b *Backuper) runCmd(name string, args ...string) error {
 	cmd := execCommand(name, args...)
-	cmd.Stdout = b.Stdout
-	cmd.Stderr = b.Stderr
+	cmd.Stdout = b.outStdout()
+	cmd.Stderr = b.outStderr()
 	return cmd.Run()
 }
 
 func (b *Backuper) captureCmd(name string, args ...string) ([]byte, error) {
 	cmd := execCommand(name, args...)
-	cmd.Stderr = b.Stderr
+	cmd.Stderr = b.outStderr()
 	return cmd.Output()
 }
 

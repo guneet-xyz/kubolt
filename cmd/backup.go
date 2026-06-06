@@ -69,24 +69,42 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	// so we use context.Background() here. TreeDone (emitted via defer in
 	// BackupApps) causes BubbleSink to self-quit; Close() below guarantees
 	// cleanup even if TreeDone is never received.
+	//
+	// Dry-run is always rendered via LineSink — the dry-run path writes a
+	// preview directly to Stdout, which would corrupt a TUI alt-screen.
 	var sink output.Sink
 	var bubbleSink *output.BubbleTeaSink
-	switch resolveOutputMode(cmd, Stdout) {
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	mode := resolveOutputMode(cmd, Stdout)
+	if dryRun {
+		mode = OutputModePlain
+	}
+	switch mode {
 	case OutputModeTUI:
 		bubbleSink = output.NewBubbleTeaSink(Stdout)
 		sink = bubbleSink
 	default:
-		sink = output.NewLineSink(Stdout)
+		sink = output.NewLineSink(Stdout, verbose)
 	}
 
 	if bubbleSink != nil {
 		go func() { _ = bubbleSink.Run(context.Background()) }()
 	}
 
-	runErr := runBackupWithHost(selected, backupDir, sshHost, dryRun, sink)
+	b, runErr := runBackupWithHost(selected, backupDir, sshHost, dryRun, sink)
 
 	if bubbleSink != nil {
 		bubbleSink.Close()
+	}
+
+	// Drain any sink-buffered output now that the TUI alt-screen is restored.
+	if b != nil {
+		for _, w := range b.Warnings {
+			fmt.Fprintln(Stderr, w)
+		}
+		if runErr == nil && b.LocalDir != "" {
+			fmt.Fprintf(Stdout, "==> Backup complete: %s\n", b.LocalDir)
+		}
 	}
 
 	return runErr
@@ -137,8 +155,10 @@ func anyFilesystemTarget(apps []manifest.App) bool {
 	return false
 }
 
-// runBackupWithHost creates a Backuper and runs BackupApps.
-func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool, sink output.Sink) error {
+// runBackupWithHost creates a Backuper and runs BackupApps. The Backuper is
+// returned (even on error) so callers can drain b.Warnings and b.LocalDir
+// after closing the sink.
+func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool, sink output.Sink) (*backup.Backuper, error) {
 	b := &backup.Backuper{
 		SSHHost:   sshHost,
 		RemoteTmp: "/tmp/kubolt-backups",
@@ -147,7 +167,7 @@ func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool
 		Stderr:    Stderr,
 		Sink:      sink,
 	}
-	return b.BackupApps(selected, dir)
+	return b, b.BackupApps(selected, dir)
 }
 
 // runBackupCore is the testable core: selects apps, validates, runs BackupApps.
@@ -161,5 +181,6 @@ func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string,
 	if err != nil {
 		return err
 	}
-	return runBackupWithHost(selected, dir, sshHost, dryRun, output.NopSink{})
+	_, err = runBackupWithHost(selected, dir, sshHost, dryRun, output.NopSink{})
+	return err
 }

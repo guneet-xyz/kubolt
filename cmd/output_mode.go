@@ -28,8 +28,13 @@ func (m OutputMode) String() string {
 
 // resolveOutputMode returns the effective output mode.
 // --plain and --tui are mutually exclusive on rootCmd.
+// --verbose overrides to OutputModePlain (no TUI).
 // Falls back to TTY auto-detection for auto mode.
 func resolveOutputMode(cmd *cobra.Command, w io.Writer) OutputMode {
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	if verbose {
+		return OutputModePlain
+	}
 	plain, _ := cmd.Flags().GetBool("plain")
 	tui, _ := cmd.Flags().GetBool("tui")
 	// Also honour legacy --no-tui on install
