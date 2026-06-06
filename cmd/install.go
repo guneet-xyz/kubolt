@@ -11,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/guneet-xyz/kubolt/internal/depgraph"
 	"github.com/guneet-xyz/kubolt/internal/helm"
 	"github.com/guneet-xyz/kubolt/internal/installer"
 	"github.com/guneet-xyz/kubolt/internal/manifest"
@@ -28,7 +27,7 @@ var installCmd = &cobra.Command{
 }
 
 func init() {
-	installCmd.Flags().Int("parallelism", -1, "max concurrent installs per wave (-1 = use manifest or default 4, 1 = sequential)")
+	installCmd.Flags().Int("parallelism", -1, "max concurrent installs across the dependency tree (-1 = use manifest or default 4, 1 = sequential)")
 	installCmd.Flags().Bool("no-tui", false, "disable interactive TUI; use plain prefixed-line output (deprecated: use --plain)")
 	rootCmd.AddCommand(installCmd)
 }
@@ -49,7 +48,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	parallelism, _ := cmd.Flags().GetInt("parallelism")
-	noTUI, _ := cmd.Flags().GetBool("no-tui")
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -85,23 +83,49 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// SIGINT/SIGTERM cancellation lives at the command boundary so the sink
+	// (which may run a Bubble Tea program) can observe ctx cancellation too.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	var sink output.Sink
-	if noTUI || os.Getenv("NO_COLOR") != "" || !isInteractive(Stdout) {
+	var bubbleSink *output.BubbleTeaSink
+	switch resolveOutputMode(cmd, Stdout) {
+	case OutputModeTUI:
+		bubbleSink = output.NewBubbleTeaSink(Stdout)
+		sink = bubbleSink
+	default:
 		sink = output.NewLineSink(Stdout)
-	} else {
-		ts := output.NewTUISink(Stdout)
-		defer ts.Close()
-		sink = ts
 	}
 
-	return installApps(m, target, runner, sink, parallelism)
+	if bubbleSink != nil {
+		go func() { _ = bubbleSink.Run(ctx) }()
+	}
+
+	runErr := installApps(ctx, m, target, runner, sink, parallelism)
+
+	if bubbleSink != nil {
+		bubbleSink.Close()
+	}
+
+	return runErr
 }
 
 // installApps resolves install order and runs helm install/upgrade for each
-// app in dependency order using the wave-based installer.Executor. When
+// app in dependency order using the tree-based installer.Executor. When
 // target is "", every app in the manifest is installed. Pure helm/manifest
 // logic — no preflight, no TTY detection — so it is directly testable.
-func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink output.Sink, parallelism int) error {
+func installApps(ctx context.Context, m *manifest.Manifest, target string, runner *helm.Runner, sink output.Sink, parallelism int) error {
 	if sink == nil {
 		sink = output.NopSink{}
 	}
@@ -109,7 +133,6 @@ func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink 
 		parallelism = 1
 	}
 
-	// 1. Resolve which apps to install.
 	var appsToInstall []string
 	var err error
 	if target == "" {
@@ -126,7 +149,6 @@ func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink 
 		inSet[n] = true
 	}
 
-	// 2. Build adjacency map restricted to apps we will install.
 	adj := make(map[string][]string, len(appsToInstall))
 	for _, name := range appsToInstall {
 		app, ok := m.AppByName(name)
@@ -142,13 +164,8 @@ func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink 
 		adj[name] = deps
 	}
 
-	waves, err := depgraph.Waves(adj)
-	if err != nil {
-		return fmt.Errorf("computing waves: %w", err)
-	}
-
-	// `helm dependency build` is run serially before any parallel installs:
-	// it mutates a shared chart cache and is not concurrency-safe.
+	// `helm dependency build` mutates a shared chart cache and is not
+	// concurrency-safe, so it must run serially before any parallel installs.
 	manifestDir := m.Dir()
 	for _, name := range appsToInstall {
 		app, _ := m.AppByName(name)
@@ -159,17 +176,6 @@ func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink 
 			}
 		}
 	}
-
-	reverseDeps := make(map[string][]string)
-	for _, name := range appsToInstall {
-		app, _ := m.AppByName(name)
-		for _, dep := range app.DependsOn {
-			if inSet[dep] {
-				reverseDeps[dep] = append(reverseDeps[dep], name)
-			}
-		}
-	}
-	dependents := installer.BuildDependents(waves, reverseDeps)
 
 	jobs := make(map[string]installer.AppJob, len(appsToInstall))
 	for _, name := range appsToInstall {
@@ -209,29 +215,13 @@ func installApps(m *manifest.Manifest, target string, runner *helm.Runner, sink 
 		}
 	}
 
-	// 6. Execute with SIGINT/SIGTERM cancellation.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-	go func() {
-		select {
-		case <-sigCh:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
 	exec := &installer.Executor{
 		Parallelism: parallelism,
 		Sink:        sink,
 	}
 	result, runErr := exec.Run(ctx, installer.Plan{
-		Waves:      waves,
-		Jobs:       jobs,
-		Dependents: dependents,
+		Nodes: adj,
+		Jobs:  jobs,
 	})
 
 	if len(result.Failed) > 0 {

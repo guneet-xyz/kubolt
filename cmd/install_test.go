@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -98,7 +99,7 @@ func TestInstall_WithDeps_CorrectOrder(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -132,7 +133,7 @@ func TestInstall_ExistingRelease_Upgrades(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -175,7 +176,7 @@ func TestInstall_ForceConflicts_Flag(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -208,7 +209,7 @@ func TestInstall_DryRun(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{DryRun: true, Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "target", runner, output.NewLineSink(&buf), 1); err != nil {
+	if err := installApps(context.Background(), m, "target", runner, output.NewLineSink(&buf), 1); err != nil {
 		t.Fatalf("installApps error: %v", err)
 	}
 
@@ -242,7 +243,7 @@ func TestInstall_MidChainFailure(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	err := installApps(m, "target", runner, output.NopSink{}, 1)
+	err := installApps(context.Background(), m, "target", runner, output.NopSink{}, 1)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -276,7 +277,7 @@ func TestInstall_AllApps_NoArg(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps all: %v", err)
 	}
 
@@ -353,7 +354,7 @@ func TestInstall_Parallel_IndependentApps(t *testing.T) {
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
 	start := time.Now()
-	if err := installApps(m, "", runner, output.NopSink{}, 3); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 3); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -401,7 +402,7 @@ func TestInstall_Parallel_DependencyOrder(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	if err := installApps(m, "", runner, output.NopSink{}, 4); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 
@@ -454,7 +455,7 @@ func TestInstall_ParallelismFlag_Sequential(t *testing.T) {
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
 	start := time.Now()
-	if err := installApps(m, "", runner, output.NopSink{}, 1); err != nil {
+	if err := installApps(context.Background(), m, "", runner, output.NopSink{}, 1); err != nil {
 		t.Fatalf("installApps: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -489,7 +490,7 @@ func TestInstall_Parallel_FailureSkipsDependents(t *testing.T) {
 	var buf bytes.Buffer
 	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
 
-	err := installApps(m, "", runner, output.NopSink{}, 4)
+	err := installApps(context.Background(), m, "", runner, output.NopSink{}, 4)
 	if err == nil {
 		t.Fatalf("expected error when A fails")
 	}
