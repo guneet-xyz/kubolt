@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,9 @@ type taskState struct {
 	err      error
 	start    time.Time
 	end      time.Time
+	// buffer is lazily allocated on the first NodeLine and moved into
+	// bubbleModel.failedDumps on NodeDone with a non-nil error.
+	buffer *NodeBuffer
 }
 
 // newTaskState constructs a fresh taskState in the "pending" status.
@@ -94,22 +98,24 @@ func (ts *taskState) elapsed() string {
 // `tasks` and `roots` slices grow them locally and are returned via the new
 // model value from Update.
 type bubbleModel struct {
-	tasks    []*taskState
-	byName   map[string]*taskState
-	roots    []string
-	children map[string][]string
-	windowW  int
-	windowH  int
-	quitting bool
-	total    int
-	done     int
+	tasks       []*taskState
+	byName      map[string]*taskState
+	roots       []string
+	children    map[string][]string
+	failedDumps map[string]*NodeBuffer
+	windowW     int
+	windowH     int
+	quitting    bool
+	total       int
+	done        int
 }
 
 // newBubbleModel returns a fresh, empty bubbleModel ready for Update calls.
 func newBubbleModel() bubbleModel {
 	return bubbleModel{
-		byName:   make(map[string]*taskState),
-		children: make(map[string][]string),
+		byName:      make(map[string]*taskState),
+		children:    make(map[string][]string),
+		failedDumps: make(map[string]*NodeBuffer),
 	}
 }
 
@@ -192,6 +198,10 @@ func (m bubbleModel) handleEvent(e Event) (tea.Model, tea.Cmd) {
 			if e.Stage != "" {
 				ts.stage = e.Stage
 			}
+			if ts.buffer == nil {
+				ts.buffer = NewNodeBuffer(0)
+			}
+			ts.buffer.WriteLine(e.Text)
 		}
 		return m, nil
 
@@ -201,9 +211,11 @@ func (m bubbleModel) handleEvent(e Event) (tea.Model, tea.Cmd) {
 			ts.err = e.Err
 			if e.Err != nil {
 				ts.status = bubbleStatusFailed
+				m.failedDumps[e.App] = ts.buffer
 			} else {
 				ts.status = bubbleStatusDone
 			}
+			ts.buffer = nil
 			m.done++
 		}
 		return m, nil
@@ -319,6 +331,8 @@ type BubbleTeaSink struct {
 	w         io.Writer
 	isTTY     bool
 	program   *tea.Program // set while Run is active; nil otherwise
+	model     bubbleModel  // captured after p.Run() returns; consulted by Close.
+	dumped    bool         // guards dumpFailures so Close stays idempotent.
 }
 
 // NewBubbleTeaSink constructs a BubbleTeaSink that writes to w. If w is os.Stdout
@@ -385,6 +399,13 @@ func (s *BubbleTeaSink) Run(ctx context.Context) error {
 	// Forwarder goroutine: pulls events off s.eventCh and pushes them into
 	// the tea.Program. Exits when ctx is cancelled, eventCh is closed, or the
 	// program has finished running.
+	//
+	// When eventCh is closed by Close, the forwarder drains the remaining
+	// events FIFO into p.Send and then issues p.Quit. Because p.Send and the
+	// quit msg share the same internal queue, this guarantees the model has
+	// processed every queued NodeLine/NodeDone before the program exits and
+	// the final model is captured. Without this ordering, Close racing
+	// p.Quit against in-flight forwards loses trailing failure events.
 	runDone := make(chan struct{})
 	forwarderDone := make(chan struct{})
 	go func() {
@@ -393,6 +414,7 @@ func (s *BubbleTeaSink) Run(ctx context.Context) error {
 			select {
 			case e, ok := <-s.eventCh:
 				if !ok {
+					p.Quit()
 					return
 				}
 				p.Send(sinkEventMsg{event: e})
@@ -404,7 +426,12 @@ func (s *BubbleTeaSink) Run(ctx context.Context) error {
 		}
 	}()
 
-	_, err := p.Run()
+	finalModel, err := p.Run()
+	if fm, ok := finalModel.(bubbleModel); ok {
+		s.mu.Lock()
+		s.model = fm
+		s.mu.Unlock()
+	}
 	close(runDone)
 	<-forwarderDone
 
@@ -417,16 +444,21 @@ func (s *BubbleTeaSink) Run(ctx context.Context) error {
 }
 
 // Close stops accepting new events and waits for Run to finish. Close is
-// idempotent. If Run is currently active, Close also asks the program to quit.
+// idempotent. Closing the event channel signals the forwarder goroutine in
+// Run to drain remaining events and then quit the program, which guarantees
+// every queued event reaches the model before the final state is captured.
+// After the underlying tea.Program has exited (and the alt-screen has been
+// restored), Close writes any captured output from failed nodes to the sink's
+// writer, between "--- output from <app> ---" markers.
 func (s *BubbleTeaSink) Close() {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		// If Run was started, wait for it; otherwise s.done was never armed.
 		select {
 		case <-s.done:
 		default:
 		}
+		s.dumpFailures()
 		return
 	}
 	s.closed = true
@@ -435,8 +467,46 @@ func (s *BubbleTeaSink) Close() {
 	s.mu.Unlock()
 
 	if p != nil {
-		p.Quit()
 		<-s.done
+	}
+	s.dumpFailures()
+}
+
+// dumpFailures writes the captured output of each failed node to the sink's
+// writer. Safe to call only after the tea.Program has exited so the alt-screen
+// is fully restored. Subsequent calls are no-ops.
+func (s *BubbleTeaSink) dumpFailures() {
+	s.mu.Lock()
+	if s.dumped {
+		s.mu.Unlock()
+		return
+	}
+	s.dumped = true
+	dumps := s.model.failedDumps
+	s.model.failedDumps = nil
+	s.mu.Unlock()
+
+	if len(dumps) == 0 {
+		return
+	}
+
+	apps := make([]string, 0, len(dumps))
+	for app := range dumps {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+
+	for _, app := range apps {
+		nb := dumps[app]
+		if nb == nil {
+			continue
+		}
+		fmt.Fprintf(s.w, "--- output from %s ---\n", app)
+		if t := nb.TruncatedBytes(); t > 0 {
+			fmt.Fprintf(s.w, "[... %d bytes elided due to 1 MiB cap ...]\n", t)
+		}
+		s.w.Write(nb.Bytes())
+		fmt.Fprintln(s.w, "--- end output ---")
 	}
 }
 

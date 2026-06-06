@@ -312,3 +312,191 @@ func TestBubbleSink_DiamondRenderOrderUnderFirstParent(t *testing.T) {
 		t.Errorf("expected merge under left, children[left]=%v", m.children["left"])
 	}
 }
+
+func TestBubbleSink_NodeLine_AppendsToBufferAndKeepsLastLine(t *testing.T) {
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "alpha"}})
+
+	if ts := m.byName["alpha"]; ts.buffer != nil {
+		t.Errorf("expected buffer nil before any NodeLine, got %v", ts.buffer)
+	}
+
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "alpha", Text: "first line"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "alpha", Text: "second line"}})
+
+	ts := m.byName["alpha"]
+	if ts.buffer == nil {
+		t.Fatal("expected buffer to be lazily allocated on first NodeLine")
+	}
+	if ts.lastLine != "second line" {
+		t.Errorf("expected lastLine='second line', got %q", ts.lastLine)
+	}
+	contents := string(ts.buffer.Bytes())
+	if !strings.Contains(contents, "first line") || !strings.Contains(contents, "second line") {
+		t.Errorf("expected buffer to contain both lines, got %q", contents)
+	}
+}
+
+func TestBubbleSink_NodeDoneSuccess_ClearsBufferAndSkipsFailedDumps(t *testing.T) {
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "alpha"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "alpha", Text: "hello"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "alpha"}})
+
+	ts := m.byName["alpha"]
+	if ts.status != bubbleStatusDone {
+		t.Errorf("expected status=done, got %q", ts.status)
+	}
+	if ts.buffer != nil {
+		t.Errorf("expected buffer cleared on success, got %v", ts.buffer)
+	}
+	if _, ok := m.failedDumps["alpha"]; ok {
+		t.Errorf("success node must not appear in failedDumps")
+	}
+}
+
+func TestBubbleSink_NodeDoneError_MovesBufferToFailedDumps(t *testing.T) {
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "beta"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "beta", Text: "before failure"}})
+
+	wantErr := errors.New("boom")
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "beta", Err: wantErr}})
+
+	ts := m.byName["beta"]
+	if ts.status != bubbleStatusFailed {
+		t.Errorf("expected status=failed, got %q", ts.status)
+	}
+	if ts.buffer != nil {
+		t.Errorf("expected ts.buffer nil after move to failedDumps, got %v", ts.buffer)
+	}
+	nb, ok := m.failedDumps["beta"]
+	if !ok || nb == nil {
+		t.Fatalf("expected failedDumps[beta] to be populated, got ok=%v nb=%v", ok, nb)
+	}
+	if !strings.Contains(string(nb.Bytes()), "before failure") {
+		t.Errorf("expected captured content in moved buffer, got %q", string(nb.Bytes()))
+	}
+}
+
+func TestBubbleSink_Close_DumpsFailedNodeBetweenMarkers(t *testing.T) {
+	var w bytes.Buffer
+	s := NewBubbleTeaSink(&w)
+
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "boom"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "boom", Text: "captured-line"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "boom", Err: errors.New("nope")}})
+
+	s.mu.Lock()
+	s.model = m
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+
+	s.Close()
+
+	out := w.String()
+	startIdx := strings.Index(out, "--- output from boom ---\n")
+	contentIdx := strings.Index(out, "captured-line")
+	endIdx := strings.Index(out, "--- end output ---")
+	if startIdx < 0 {
+		t.Errorf("expected start marker, got %q", out)
+	}
+	if contentIdx < 0 {
+		t.Errorf("expected captured line in dump, got %q", out)
+	}
+	if endIdx < 0 {
+		t.Errorf("expected end marker, got %q", out)
+	}
+	if !(startIdx < contentIdx && contentIdx < endIdx) {
+		t.Errorf("expected order start->content->end, got start=%d content=%d end=%d in %q",
+			startIdx, contentIdx, endIdx, out)
+	}
+}
+
+func TestBubbleSink_Close_NoFailures_NoMarkers(t *testing.T) {
+	var w bytes.Buffer
+	s := NewBubbleTeaSink(&w)
+
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "ok"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "ok", Text: "happy-line"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "ok"}})
+
+	s.mu.Lock()
+	s.model = m
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+
+	s.Close()
+
+	out := w.String()
+	if strings.Contains(out, "--- output from") || strings.Contains(out, "--- end output ---") {
+		t.Errorf("expected no failure markers, got %q", out)
+	}
+	if strings.Contains(out, "happy-line") {
+		t.Errorf("successful node's buffer must not appear in writer, got %q", out)
+	}
+}
+
+func TestBubbleSink_Close_TruncationMarker(t *testing.T) {
+	var w bytes.Buffer
+	s := NewBubbleTeaSink(&w)
+
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "big"}})
+	m.byName["big"].buffer = NewNodeBuffer(8)
+
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "big", Text: "abcdef"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "big", Text: "ghijkl"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "big", Err: errors.New("oops")}})
+
+	if nb := m.failedDumps["big"]; nb == nil || nb.TruncatedBytes() == 0 {
+		t.Fatalf("test setup: expected truncation in moved buffer, got nb=%v", nb)
+	}
+
+	s.mu.Lock()
+	s.model = m
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+
+	s.Close()
+
+	out := w.String()
+	if !strings.Contains(out, "bytes elided due to 1 MiB cap") {
+		t.Errorf("expected truncation marker, got %q", out)
+	}
+	startIdx := strings.Index(out, "--- output from big ---\n")
+	truncIdx := strings.Index(out, "[... ")
+	if startIdx < 0 || truncIdx <= startIdx {
+		t.Errorf("truncation marker must follow start marker, got %q", out)
+	}
+}
+
+func TestBubbleSink_Close_Idempotent(t *testing.T) {
+	var w bytes.Buffer
+	s := NewBubbleTeaSink(&w)
+
+	m := newBubbleModel()
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeStart, App: "boom"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeLine, App: "boom", Text: "line"}})
+	m, _ = updateModel(t, m, sinkEventMsg{event: Event{Kind: NodeDone, App: "boom", Err: errors.New("nope")}})
+
+	s.mu.Lock()
+	s.model = m
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+
+	s.Close()
+	first := w.String()
+	s.Close()
+	second := w.String()
+
+	if first != second {
+		t.Errorf("expected Close to be idempotent; first=%q second=%q", first, second)
+	}
+}
