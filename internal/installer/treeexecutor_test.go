@@ -73,7 +73,7 @@ func TestTreeExecutorRun_HappyPath(t *testing.T) {
 		Jobs: map[string]AppJob{
 			"a": successJob("a"),
 			"b": successJob("b"),
-		},}
+		}}
 
 	ex := Executor{Parallelism: 2, Sink: sink}
 	res, err := ex.Run(context.Background(), plan)
@@ -147,15 +147,15 @@ func TestTreeExecutorRun_Serial(t *testing.T) {
 	}
 
 	plan := Plan{Nodes: map[string][]string{
-			"a": nil,
-			"b": {"a"},
-			"c": {"b"},
-		},
+		"a": nil,
+		"b": {"a"},
+		"c": {"b"},
+	},
 		Jobs: map[string]AppJob{
 			"a": makeJob("a"),
 			"b": makeJob("b"),
 			"c": makeJob("c"),
-		},}
+		}}
 
 	ex := Executor{Parallelism: 4, Sink: &recordingSink{}}
 	res, err := ex.Run(context.Background(), plan)
@@ -179,15 +179,15 @@ func TestTreeExecutorRun_FailureCascade(t *testing.T) {
 	bootErr := errors.New("boom")
 
 	plan := Plan{Nodes: map[string][]string{
-			"a": nil,
-			"b": {"a"},
-			"c": {"b"},
-		},
+		"a": nil,
+		"b": {"a"},
+		"c": {"b"},
+	},
 		Jobs: map[string]AppJob{
 			"a": failingJob("a", bootErr),
 			"b": successJob("b"),
 			"c": successJob("c"),
-		},}
+		}}
 
 	ex := Executor{Parallelism: 1, Sink: sink}
 	res, err := ex.Run(context.Background(), plan)
@@ -247,7 +247,7 @@ func TestTreeExecutorRun_CtxCancel(t *testing.T) {
 			"a": makeJob("a"),
 			"b": makeJob("b"),
 			"c": makeJob("c"),
-		},}
+		}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -282,7 +282,7 @@ func TestTreeExecutorRun_Parallelism(t *testing.T) {
 			"b": makeJob("b"),
 			"c": makeJob("c"),
 			"d": makeJob("d"),
-		},}
+		}}
 
 	ex := Executor{Parallelism: 2, Sink: &recordingSink{}}
 
@@ -306,7 +306,7 @@ func TestTreeExecutorRun_Parallelism(t *testing.T) {
 func TestTreeExecutorRun_MissingJob(t *testing.T) {
 	sink := &recordingSink{}
 	plan := Plan{Nodes: map[string][]string{"x": nil},
-		Jobs:  map[string]AppJob{},}
+		Jobs: map[string]AppJob{}}
 
 	ex := Executor{Parallelism: 1, Sink: sink}
 	res, err := ex.Run(context.Background(), plan)
@@ -340,7 +340,7 @@ func TestTreeExecutorRun_NilSink(t *testing.T) {
 	plan := Plan{Nodes: map[string][]string{"a": nil},
 		Jobs: map[string]AppJob{
 			"a": successJob("a"),
-		},}
+		}}
 
 	ex := Executor{Parallelism: 1, Sink: nil}
 	res, err := ex.Run(context.Background(), plan)

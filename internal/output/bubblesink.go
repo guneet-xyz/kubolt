@@ -13,20 +13,20 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 )
 
 const (
-	bubbleEventBuffer    = 256
-	bubbleLastLineLimit  = 60
-	bubbleStoredLineMax  = 80
-	bubbleLastLineLabel  = "running"
-	bubbleStatusPending  = "pending"
-	bubbleStatusRunning  = "running"
-	bubbleStatusDone     = "done"
-	bubbleStatusFailed   = "failed"
-	bubbleStatusSkipped  = "skipped"
+	bubbleEventBuffer   = 256
+	bubbleLastLineLimit = 60
+	bubbleStoredLineMax = 80
+	bubbleLastLineLabel = "running"
+	bubbleStatusPending = "pending"
+	bubbleStatusRunning = "running"
+	bubbleStatusDone    = "done"
+	bubbleStatusFailed  = "failed"
+	bubbleStatusSkipped = "skipped"
 )
 
 // sinkEventMsg wraps a sink Event so it can flow through tea.Program as a Msg.

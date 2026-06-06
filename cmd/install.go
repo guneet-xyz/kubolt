@@ -32,7 +32,6 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
-
 func runInstall(cmd *cobra.Command, args []string) error {
 	var target string
 	if len(args) == 1 {

@@ -66,12 +66,12 @@ func TestFlagMutualExclusion(t *testing.T) {
 	cmd.PersistentFlags().Bool("tui", false, "")
 	cmd.MarkFlagsMutuallyExclusive("plain", "tui")
 	cmd.SetArgs([]string{"--plain", "--tui"})
-	
+
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error with conflicting flags")
 	}
-	
+
 	errText := err.Error()
 	if !contains(errText, "plain") || !contains(errText, "tui") {
 		t.Errorf("error message should mention both 'plain' and 'tui': %s", errText)

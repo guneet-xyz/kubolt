@@ -131,5 +131,3 @@ func findCycle(nodes map[string][]string) string {
 	}
 	return "unknown cycle"
 }
-
-

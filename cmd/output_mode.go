@@ -11,8 +11,8 @@ type OutputMode int
 
 const (
 	OutputModeAuto  OutputMode = iota // auto-detect via isInteractive
-	OutputModePlain                    // force plain prefixed-line output
-	OutputModeTUI                      // force Bubble Tea TUI
+	OutputModePlain                   // force plain prefixed-line output
+	OutputModeTUI                     // force Bubble Tea TUI
 )
 
 func (m OutputMode) String() string {
