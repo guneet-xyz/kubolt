@@ -10,7 +10,9 @@ Kubolt is a Go CLI that drives Helm-based cluster management from a single `kubo
 
 - `cmd/`: Cobra commands. One file per command: `install`, `uninstall`, `backup`, `validate`, `list`, `version`, `upgrade`. `root.go` wires the command tree and global flags.
 - `internal/manifest/`: YAML parsing for `kubolt.yaml`, schema types, and dependency-graph queries (e.g. "what depends on app X").
-- `internal/depgraph/`: Topological sort and cycle detection over the app graph. Pure functions, no I/O.
+- `internal/depgraph/`: Exposes `TopoSort() []string` for ordered installs and a `Walker` for parallel DAG traversal. The walker releases each node as soon as its dependencies complete, using a dispatcher-goroutine pattern with a channel-based ready-set; callers consume `Ready` and report completion via `Done(name, err)`. Pure logic, no I/O.
+- `internal/installer/`: Owns `Plan{Nodes, Jobs, Dependents}` and an `Executor` that walks the DAG via the depgraph walker, gated by a semaphore-based parallelism cap. `Executor.Run(ctx, plan)` emits `NodeStart` / `NodeDone` / `NodeSkip` / `TreeStart` / `TreeDone` events to a sink instead of touching stdout directly.
+- `internal/output/`: Defines the `Sink` interface plus three implementations: `BubbleTeaSink` (Bubble Tea v2, tree-rendered TUI for interactive terminals), `LineSink` (plain prefixed-line output, no ANSI, safe for CI logs), and `NopSink` (tests). The `resolveOutputMode(cmd, w)` helper in `cmd/output_mode.go` selects the right sink from `--plain` / `--tui` flags and TTY detection.
 - `internal/helm/`: Argument builders for helm subcommands and the `exec.Cmd` wrapper. Exposes a `SetExecCommand` test seam so unit tests can stub helm invocations.
 - `internal/backup/`: Interrupt-safe PVC backup orchestrator. Owns the scale-down / copy / scale-up state machine and the signal handler that runs restore on `SIGINT`/`SIGTERM`.
 - `internal/preflight/`: Pre-flight checks for required binaries (`helm`, `kubectl`, `ssh`), kube context auth, and SSH reachability.
@@ -20,9 +22,10 @@ Kubolt is a Go CLI that drives Helm-based cluster management from a single `kubo
 
 1. Create `cmd/<name>.go`.
 2. Define a `cobra.Command` and register it in `cmd/root.go` via `rootCmd.AddCommand(...)`.
-3. Extract the command's real work into a testable core function. The `RunE` should be a thin shell that parses flags, loads the manifest, then calls the core.
-4. For any external process, route through `internal/helm` (or a similar package-level `execCommand` variable) so tests can stub it with `helm.SetExecCommand`.
-5. Write `cmd/<name>_test.go`. Cover the happy path, at least one failure path, and any flag interactions. Use golden files when output is structured.
+3. If the command renders progress, call `resolveOutputMode(cmd, os.Stdout)` (from `cmd/output_mode.go`) to pick the right `output.Sink`: a `BubbleTeaSink` for TTYs and a `LineSink` for plain or non-interactive output. Pass the sink into your core function. For `BubbleTeaSink`, call `sink.Run(ctx)` in a goroutine before kicking off execution and `sink.Wait()` after the executor returns.
+4. Extract the command's real work into a testable core function. The `RunE` should be a thin shell that parses flags, loads the manifest, then calls the core.
+5. For any external process, route through `internal/helm` (or a similar package-level `execCommand` variable) so tests can stub it with `helm.SetExecCommand`.
+6. Write `cmd/<name>_test.go`. Cover the happy path, at least one failure path, and any flag interactions. Use golden files when output is structured.
 
 ## Testing conventions
 
@@ -36,6 +39,7 @@ Kubolt is a Go CLI that drives Helm-based cluster management from a single `kubo
   ```
 
 - Table-driven tests are the default style. Keep cases small and named.
+- When testing Bubble Tea components, drive `Update()` directly with synthetic messages (e.g., `sinkEventMsg{event: ...}`). Never golden-file `View()` output, since ANSI codes and frame timing make those goldens fragile. Assert on model state (`m.tasks`, `m.total`, etc.) after each `Update()` call.
 
 ## Release process
 

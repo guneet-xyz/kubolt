@@ -112,7 +112,7 @@ apps:
 
 With an app name, installs the target app along with its full dependency chain in topological order. Without an arg, installs **every app in the manifest** in dependency order. Every app is run through `helm upgrade --install`, even if already installed, so the manifest is the source of truth.
 
-- Flags: `--dry-run` (print the helm commands without executing), `--parallelism N`, `--no-tui`.
+- Flags: `--dry-run` (print the helm commands without executing), `--parallelism N`, plus the global `--plain` / `--tui` (see [Output](#output)). The legacy `--no-tui` is still accepted as a deprecated alias for `--plain`.
 - Environment:
   - `HELM_FORCE_CONFLICTS`: when set, appends `--force-conflicts` to helm calls.
   - `HELM_TAKE_OWNERSHIP`: when set, appends `--take-ownership` to helm calls.
@@ -121,11 +121,11 @@ With an app name, installs the target app along with its full dependency chain i
 
 #### Parallel installs
 
-Kubolt installs apps in **waves**. A wave is a set of apps with no dependency on each other, so they're installed simultaneously. Each wave waits for the previous one to finish before starting, which guarantees dependents always see their dependencies installed.
+Kubolt resolves apps into a dependency DAG and walks it like a tree: an app only starts once every app it depends on has finished successfully. Independent branches run in parallel, gated by `--parallelism`.
 
 `helm dependency build` always runs serially (once per chart, before the parallel phase) because the chart cache isn't safe for concurrent writers.
 
-**`--parallelism N`** controls how many apps may install at once within a wave:
+**`--parallelism N`** is a global semaphore over the DAG ready-set, capping how many apps install simultaneously across the entire tree:
 
 - Default `-1`: read `parallelism:` from the manifest, or fall back to `4`.
 - `1`: serial mode. Useful when debugging a single failing chart.
@@ -141,16 +141,11 @@ apps:
     ...
 ```
 
-**Output modes:**
-
-- Interactive terminal: a live [pterm](https://github.com/pterm/pterm) dashboard with per-app status, spinner, and elapsed time.
-- Piped or non-TTY (CI logs, `tee`, redirected output): prefixed lines like `[cert-manager] installing...`, one stream per app, interleaved.
-- `--no-tui`: forces the prefixed line format even when stdout is a real terminal. Handy for debugging or screen-recording.
-- `NO_COLOR=1`: disables color in both modes.
+See [Output](#output) for how install renders progress as an indented tree of spinners or as plain prefixed lines.
 
 **Failure behavior:**
 
-When an app fails, its transitive dependents are marked **SKIPPED** in the output and never start. Unrelated apps in the same or later waves keep running to completion. The exit code is non-zero if any app actually failed; SKIPPED apps don't on their own cause a non-zero exit.
+When an app fails, its transitive dependents are marked **SKIPPED** in the output and never start. Independent branches of the DAG keep running to completion. The exit code is non-zero if any app actually failed; SKIPPED apps don't on their own cause a non-zero exit.
 
 ### `uninstall <app>`
 
@@ -166,7 +161,7 @@ Backs up targets declared under `apps[].backup.targets`. Two strategies are supp
 - **`filesystem`**: scales the app's deployments to `0` (when `scaleDeployments` is true), streams the PVC contents over SSH using `tar`, copies the archive locally with `scp`, then restores replica counts. The scale-up also runs on `SIGINT`/`SIGTERM`.
 - **`pg_dump`**: runs `kubectl exec <pod> -- pg_dump -Fc <db>` and streams the output to `<dir>/<timestamp>/<app>-<dbname>.dump`. No SSH, no scale-down. The database name is auto-detected from the pod's environment (`PGDATABASE`, `POSTGRES_DB`, `POSTGRESQL_DATABASE`, first non-empty wins).
 
-With no positional args, every app with a `backup` block is processed.
+With no positional args, every app with a `backup` block is processed. Apps run in the order they appear in `kubolt.yaml`; `dependsOn` is ignored here. See [Output](#output) for the per-stage progress display.
 
 Preflight checks: `kubectl` is always required. `ssh`, `scp`, and `tar` are only checked when at least one `filesystem` target is selected.
 
@@ -204,6 +199,44 @@ Self-updates the kubolt binary from GitHub Releases. The downloaded archive's ch
   - `--require-signature`: also verify the cosign signature on the checksum file before installing.
   - `--dry-run`: show what would be downloaded without modifying the binary.
 - Exit codes: `0` on success, non-zero on download, checksum, or signature failure.
+
+## Output
+
+Kubolt renders progress in one of two modes per command run:
+
+- **TUI** (Bubble Tea v2): a live, in-place display with per-app spinners and elapsed time. Used by default when stdout is a terminal.
+- **Plain**: prefixed lines like `[cert-manager] OK in 3.2s`, no ANSI cursor moves and no redraws. Used by default when stdout is piped, redirected, or otherwise non-interactive (CI logs, `tee`, files).
+
+The mode can be overridden with persistent flags on any command:
+
+| Flag | Effect |
+|------|--------|
+| `--tui` | Force the Bubble Tea TUI even when stdout isn't a terminal. |
+| `--plain` | Force plain prefixed-line output even on a real terminal. |
+| `--no-tui` | Deprecated alias for `--plain`. Still honoured for backwards compatibility. |
+
+`--tui` and `--plain` are mutually exclusive. `NO_COLOR=1` disables ANSI color in both modes.
+
+### What each command renders
+
+- **`install`** runs as a DAG and renders an indented tree of spinners. Each row shows an app's status (`pending`, `running`, `OK`, `FAILED`, `SKIPPED`) and elapsed time. Indentation reflects depth in the dependency graph; siblings install in parallel up to `--parallelism`.
+- **`uninstall`** is single-app, so it renders a single spinner. It refuses to start if any installed app declares the target in its `dependsOn`.
+- **`backup`** ignores the dependency graph and processes apps in manifest order as a flat list. Each row carries a stage label that walks through `scaling-down → copying → scaling-up`, so you can see exactly which phase a long-running app is in.
+
+### Plain output example
+
+`kubolt install --plain` against a small set of apps where one fails:
+
+```
+=== Starting (4 apps) ===
+[cert-manager] starting
+[cert-manager] OK in 3.2s
+[prometheus] starting
+[grafana] starting
+[prometheus] OK in 8.1s
+[grafana] FAILED in 2.0s: exit status 1
+=== Complete (succeeded=2 failed=1 skipped=0) ===
+```
 
 ## Environment variables
 
