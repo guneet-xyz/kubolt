@@ -34,63 +34,63 @@ func TestNopSink_AllEventKinds(t *testing.T) {
 		event Event
 	}{
 		{
-			name: "AppStart",
+			name:  "AppStart",
 			event: Event{Kind: AppStart, App: "myapp"},
 		},
 		{
-			name: "AppLine",
+			name:  "AppLine",
 			event: Event{Kind: AppLine, App: "myapp", Text: "installing..."},
 		},
 		{
-			name: "AppDone success",
+			name:  "AppDone success",
 			event: Event{Kind: AppDone, App: "myapp", Err: nil},
 		},
 		{
-			name: "AppDone failure",
+			name:  "AppDone failure",
 			event: Event{Kind: AppDone, App: "myapp", Err: errors.New("helm failed")},
 		},
 		{
-			name: "AppSkip",
+			name:  "AppSkip",
 			event: Event{Kind: AppSkip, App: "myapp", Reason: "dependency failed"},
 		},
 		{
-			name: "AllDone",
+			name:  "AllDone",
 			event: Event{Kind: AllDone},
 		},
 		{
-			name: "NodeReady",
+			name:  "NodeReady",
 			event: Event{Kind: NodeReady, App: "myapp"},
 		},
 		{
-			name: "NodeStart",
+			name:  "NodeStart",
 			event: Event{Kind: NodeStart, App: "myapp"},
 		},
 		{
-			name: "NodeLine short",
+			name:  "NodeLine short",
 			event: Event{Kind: NodeLine, App: "myapp", Text: "output line"},
 		},
 		{
-			name: "NodeLine long",
+			name:  "NodeLine long",
 			event: Event{Kind: NodeLine, App: "myapp", Text: "this is a very long line of output that should not cause any side effects or allocations in the nop sink implementation " + string(make([]byte, 1000))},
 		},
 		{
-			name: "NodeDone success",
+			name:  "NodeDone success",
 			event: Event{Kind: NodeDone, App: "myapp", Err: nil},
 		},
 		{
-			name: "NodeDone failure",
+			name:  "NodeDone failure",
 			event: Event{Kind: NodeDone, App: "myapp", Err: errors.New("boom")},
 		},
 		{
-			name: "NodeSkip",
+			name:  "NodeSkip",
 			event: Event{Kind: NodeSkip, App: "myapp", Reason: "parent failed"},
 		},
 		{
-			name: "TreeStart",
+			name:  "TreeStart",
 			event: Event{Kind: TreeStart, Count: 5},
 		},
 		{
-			name: "TreeDone",
+			name:  "TreeDone",
 			event: Event{Kind: TreeDone},
 		},
 	}
