@@ -409,7 +409,7 @@ func TestBubbleSink_Close_DumpsFailedNodeBetweenMarkers(t *testing.T) {
 	if endIdx < 0 {
 		t.Errorf("expected end marker, got %q", out)
 	}
-	if !(startIdx < contentIdx && contentIdx < endIdx) {
+	if startIdx >= contentIdx || contentIdx >= endIdx {
 		t.Errorf("expected order start->content->end, got start=%d content=%d end=%d in %q",
 			startIdx, contentIdx, endIdx, out)
 	}

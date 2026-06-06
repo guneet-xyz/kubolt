@@ -505,7 +505,7 @@ func (s *BubbleTeaSink) dumpFailures() {
 		if t := nb.TruncatedBytes(); t > 0 {
 			fmt.Fprintf(s.w, "[... %d bytes elided due to 1 MiB cap ...]\n", t)
 		}
-		s.w.Write(nb.Bytes())
+		_, _ = s.w.Write(nb.Bytes())
 		fmt.Fprintln(s.w, "--- end output ---")
 	}
 }
