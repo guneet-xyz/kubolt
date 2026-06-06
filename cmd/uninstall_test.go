@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/guneet-xyz/kubolt/internal/helm"
+	"github.com/guneet-xyz/kubolt/internal/output"
 )
 
 func stubHelm(listOutputs map[string]string, rec *callRecorder) {
@@ -202,4 +205,124 @@ func equalSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+type recordSink struct {
+	mu     sync.Mutex
+	events []output.Event
+}
+
+func (r *recordSink) Emit(e output.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+func (r *recordSink) snapshot() []output.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]output.Event, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+func TestUninstallWithSink_BlockedByDependent(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "target", namespace: "ns-target"},
+		{name: "consumer", namespace: "ns-consumer", dependsOn: []string{"target"}},
+	})
+
+	rec := &callRecorder{}
+	stubHelm(map[string]string{
+		"ns-consumer": `[{"name":"consumer"}]`,
+	}, rec)
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	sink := &recordSink{}
+	err := uninstallAppWithSink(context.Background(), m, "target", runner, sink)
+	if err == nil {
+		t.Fatalf("expected error when blocked by dependent, got nil")
+	}
+	if !strings.Contains(err.Error(), "consumer") {
+		t.Fatalf("error should mention dependent name 'consumer', got: %v", err)
+	}
+
+	for _, e := range sink.snapshot() {
+		switch e.Kind {
+		case output.TreeStart, output.NodeReady, output.NodeStart, output.NodeDone, output.TreeDone:
+			t.Fatalf("blocked uninstall must not emit tree-framing events, got %s", e.Kind)
+		}
+	}
+
+	calls := rec.snapshot()
+	if n := helmCallCount(calls, "uninstall"); n != 0 {
+		t.Fatalf("expected 0 helm uninstall calls when blocked, got %d", n)
+	}
+}
+
+func TestUninstallWithSink_PlainSuccess(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "foo", namespace: "ns-foo"},
+	})
+
+	rec := &callRecorder{}
+	stubHelm(nil, rec)
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	sink := &recordSink{}
+	if err := uninstallAppWithSink(context.Background(), m, "foo", runner, sink); err != nil {
+		t.Fatalf("uninstallAppWithSink: %v", err)
+	}
+
+	events := sink.snapshot()
+	wantSeq := []output.EventKind{
+		output.TreeStart,
+		output.NodeReady,
+		output.NodeStart,
+		output.NodeDone,
+		output.TreeDone,
+	}
+	gotSeq := make([]output.EventKind, 0, len(events))
+	for _, e := range events {
+		switch e.Kind {
+		case output.TreeStart, output.NodeReady, output.NodeStart, output.NodeDone, output.TreeDone:
+			gotSeq = append(gotSeq, e.Kind)
+		}
+	}
+	if len(gotSeq) != len(wantSeq) {
+		t.Fatalf("event sequence length = %d, want %d (got=%v)", len(gotSeq), len(wantSeq), gotSeq)
+	}
+	for i := range wantSeq {
+		if gotSeq[i] != wantSeq[i] {
+			t.Fatalf("event[%d] = %s, want %s (full=%v)", i, gotSeq[i], wantSeq[i], gotSeq)
+		}
+	}
+
+	last := events[len(events)-1]
+	if last.Kind != output.TreeDone {
+		t.Fatalf("final event = %s, want TreeDone", last.Kind)
+	}
+}
+
+func TestUninstallWithSink_NilSink(t *testing.T) {
+	m := setupInstallManifest(t, []installTestApp{
+		{name: "foo", namespace: "ns-foo"},
+	})
+
+	rec := &callRecorder{}
+	stubHelm(nil, rec)
+	defer helm.ResetExecCommand()
+
+	var buf bytes.Buffer
+	runner := &helm.Runner{Stdout: &buf, Stderr: &buf}
+
+	if err := uninstallAppWithSink(context.Background(), m, "foo", runner, nil); err != nil {
+		t.Fatalf("uninstallAppWithSink with nil sink: %v", err)
+	}
 }

@@ -1,13 +1,19 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/guneet-xyz/kubolt/internal/helm"
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 	"github.com/guneet-xyz/kubolt/internal/preflight"
 	"github.com/spf13/cobra"
 )
@@ -47,7 +53,42 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		Stderr: Stderr,
 	}
 
-	return uninstallApp(m, target, runner)
+	// SIGINT/SIGTERM cancellation lives at the command boundary so the sink
+	// (which may run a Bubble Tea program) can observe ctx cancellation too.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	var sink output.Sink
+	var bubbleSink *output.BubbleTeaSink
+	switch resolveOutputMode(cmd, Stdout) {
+	case OutputModeTUI:
+		bubbleSink = output.NewBubbleTeaSink(Stdout)
+		sink = bubbleSink
+	default:
+		sink = output.NewLineSink(Stdout)
+	}
+
+	if bubbleSink != nil {
+		go func() { _ = bubbleSink.Run(ctx) }()
+	}
+
+	runErr := uninstallAppWithSink(ctx, m, target, runner, sink)
+
+	if bubbleSink != nil {
+		bubbleSink.Close()
+	}
+
+	return runErr
 }
 
 // uninstallApp removes target via `helm uninstall`. If any installed app still
@@ -82,4 +123,124 @@ func uninstallApp(m *manifest.Manifest, target string, runner *helm.Runner) erro
 	}
 
 	return runner.Run(helm.BuildUninstall(target, app.Namespace))
+}
+
+// uninstallAppWithSink is the sink-aware version of uninstallApp. It performs
+// the same dependent-blocking check and helm uninstall, but wraps the helm run
+// with tree-vocabulary sink events so a TUI or line sink can render progress.
+//
+// The blocking check fires before any tree events are emitted, so a blocked
+// uninstall produces no TreeStart / NodeStart noise.
+func uninstallAppWithSink(ctx context.Context, m *manifest.Manifest, target string, runner *helm.Runner, sink output.Sink) error {
+	if sink == nil {
+		sink = output.NopSink{}
+	}
+
+	app, ok := m.AppByName(target)
+	if !ok {
+		return fmt.Errorf("unknown app: %q", target)
+	}
+
+	dependents := m.Dependents(target)
+	var blocking []string
+	for _, depName := range dependents {
+		depApp, ok := m.AppByName(depName)
+		if !ok {
+			continue
+		}
+		out, err := runner.Capture(helm.BuildList(depApp.Namespace))
+		if err != nil {
+			return fmt.Errorf("checking dependent %s: %w", depName, err)
+		}
+		if releaseExists(out, depName) {
+			blocking = append(blocking, depName)
+		}
+	}
+
+	if len(blocking) > 0 {
+		return fmt.Errorf("cannot uninstall %s: still required by installed apps: %s",
+			target, strings.Join(blocking, ", "))
+	}
+
+	// Emit tree framing — uninstall is a single-node tree.
+	sink.Emit(output.Event{Kind: output.TreeStart, Count: 1})
+	sink.Emit(output.Event{Kind: output.NodeReady, App: target})
+	sink.Emit(output.Event{Kind: output.NodeStart, App: target})
+
+	stdout := newUninstallLineWriter(sink, target, "stdout")
+	stderr := newUninstallLineWriter(sink, target, "stderr")
+
+	err := runner.RunWith(ctx, helm.BuildUninstall(target, app.Namespace), stdout, stderr)
+	stdout.flush()
+	stderr.flush()
+
+	sink.Emit(output.Event{Kind: output.NodeDone, App: target, Err: err})
+	sink.Emit(output.Event{Kind: output.TreeDone})
+
+	return err
+}
+
+// uninstallLineWriter buffers writes and emits NodeLine events per line.
+// The mutex protects the buffer; sink.Emit is invoked outside the lock so a
+// blocking sink cannot deadlock writers feeding the same writer concurrently.
+type uninstallLineWriter struct {
+	sink   output.Sink
+	app    string
+	stream string
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newUninstallLineWriter(sink output.Sink, app, stream string) *uninstallLineWriter {
+	return &uninstallLineWriter{sink: sink, app: app, stream: stream}
+}
+
+func (w *uninstallLineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.buf.Write(p)
+	var lines []string
+	for {
+		data := w.buf.Bytes()
+		idx := bytes.IndexByte(data, '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(data[:idx])
+		next := make([]byte, len(data)-idx-1)
+		copy(next, data[idx+1:])
+		w.buf.Reset()
+		w.buf.Write(next)
+		lines = append(lines, line)
+	}
+	w.mu.Unlock()
+
+	for _, line := range lines {
+		w.sink.Emit(output.Event{
+			Kind:   output.NodeLine,
+			App:    w.app,
+			Stream: w.stream,
+			Text:   line,
+		})
+	}
+	return len(p), nil
+}
+
+// flush emits any buffered partial line.
+func (w *uninstallLineWriter) flush() {
+	w.mu.Lock()
+	if w.buf.Len() == 0 {
+		w.mu.Unlock()
+		return
+	}
+	text := w.buf.String()
+	w.buf.Reset()
+	w.mu.Unlock()
+
+	w.sink.Emit(output.Event{
+		Kind:   output.NodeLine,
+		App:    w.app,
+		Stream: w.stream,
+		Text:   text,
+	})
 }
