@@ -12,6 +12,7 @@ import (
 
 	"github.com/guneet-xyz/kubolt/internal/backup"
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 	"github.com/guneet-xyz/kubolt/internal/preflight"
 )
 
@@ -230,5 +231,91 @@ func TestBackup_DryRun(t *testing.T) {
 	}
 	if len(rec.snapshot()) != 0 {
 		t.Fatalf("expected no real exec calls in dry-run mode, got %d", len(rec.snapshot()))
+	}
+}
+
+func TestBackupWithSink_PlainMode(t *testing.T) {
+	m := setupBackupManifest(t, []backupTestApp{
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
+	})
+
+	rec := &backupCallRecorder{}
+	stubBackupExec(rec)
+	defer backup.ResetExecCommand()
+
+	selected, err := selectApps(m, nil)
+	if err != nil {
+		t.Fatalf("selectApps: %v", err)
+	}
+
+	sink := &recordSink{}
+	if err := runBackupWithHost(selected, t.TempDir(), "testhost", false, sink); err != nil {
+		t.Fatalf("runBackupWithHost: %v", err)
+	}
+
+	events := sink.snapshot()
+	if len(events) == 0 {
+		t.Fatalf("expected events, got none")
+	}
+
+	if events[0].Kind != output.TreeStart {
+		t.Fatalf("event[0] kind = %s, want TreeStart", events[0].Kind)
+	}
+	if events[0].Count != 1 {
+		t.Fatalf("TreeStart.Count = %d, want 1", events[0].Count)
+	}
+	if events[len(events)-1].Kind != output.TreeDone {
+		t.Fatalf("last event kind = %s, want TreeDone", events[len(events)-1].Kind)
+	}
+
+	wantInOrder := []output.EventKind{
+		output.TreeStart,
+		output.NodeStart,
+		output.NodeLine,
+		output.NodeDone,
+		output.TreeDone,
+	}
+	idx := 0
+	for _, e := range events {
+		if idx < len(wantInOrder) && e.Kind == wantInOrder[idx] {
+			idx++
+		}
+	}
+	if idx != len(wantInOrder) {
+		var got []string
+		for _, e := range events {
+			got = append(got, e.Kind.String())
+		}
+		t.Fatalf("missing expected event sequence; got events: %v", got)
+	}
+
+	sawCopying := false
+	for _, e := range events {
+		if e.Kind == output.NodeLine && e.Stage == "copying" {
+			sawCopying = true
+			break
+		}
+	}
+	if !sawCopying {
+		t.Fatalf("expected NodeLine with Stage=copying, did not find it")
+	}
+}
+
+func TestBackupWithSink_NilSink(t *testing.T) {
+	m := setupBackupManifest(t, []backupTestApp{
+		{name: "a1", namespace: "ns1", targets: []string{"pvc-a1"}},
+	})
+
+	rec := &backupCallRecorder{}
+	stubBackupExec(rec)
+	defer backup.ResetExecCommand()
+
+	selected, err := selectApps(m, nil)
+	if err != nil {
+		t.Fatalf("selectApps: %v", err)
+	}
+
+	if err := runBackupWithHost(selected, t.TempDir(), "testhost", false, output.NopSink{}); err != nil {
+		t.Fatalf("runBackupWithHost with NopSink: %v", err)
 	}
 }

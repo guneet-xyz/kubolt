@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/guneet-xyz/kubolt/internal/backup"
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 	"github.com/guneet-xyz/kubolt/internal/preflight"
 	"github.com/spf13/cobra"
 )
@@ -48,21 +50,46 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 
 	// ssh/scp/tar only needed when at least one filesystem target is present.
+	var sshHost string
 	if anyFilesystemTarget(selected) {
 		if err := preflight.RequireBinaries("ssh", "scp", "tar"); err != nil {
 			return err
 		}
-		host, err := preflight.RequireSSHHost()
-		if err != nil {
-			return err
+		host, hostErr := preflight.RequireSSHHost()
+		if hostErr != nil {
+			return hostErr
 		}
 		if err := preflight.RequirePasswordlessSSH(host); err != nil {
 			return err
 		}
-		return runBackupWithHost(selected, backupDir, host, dryRun)
+		sshHost = host
 	}
 
-	return runBackupWithHost(selected, backupDir, "", dryRun)
+	// Sink selection. BackupApps owns its own ctx + SIGINT handler internally,
+	// so we use context.Background() here. TreeDone (emitted via defer in
+	// BackupApps) causes BubbleSink to self-quit; Close() below guarantees
+	// cleanup even if TreeDone is never received.
+	var sink output.Sink
+	var bubbleSink *output.BubbleTeaSink
+	switch resolveOutputMode(cmd, Stdout) {
+	case OutputModeTUI:
+		bubbleSink = output.NewBubbleTeaSink(Stdout)
+		sink = bubbleSink
+	default:
+		sink = output.NewLineSink(Stdout)
+	}
+
+	if bubbleSink != nil {
+		go func() { _ = bubbleSink.Run(context.Background()) }()
+	}
+
+	runErr := runBackupWithHost(selected, backupDir, sshHost, dryRun, sink)
+
+	if bubbleSink != nil {
+		bubbleSink.Close()
+	}
+
+	return runErr
 }
 
 // selectApps selects apps based on provided names or all apps with backup specs.
@@ -111,13 +138,14 @@ func anyFilesystemTarget(apps []manifest.App) bool {
 }
 
 // runBackupWithHost creates a Backuper and runs BackupApps.
-func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool) error {
+func runBackupWithHost(selected []manifest.App, dir, sshHost string, dryRun bool, sink output.Sink) error {
 	b := &backup.Backuper{
 		SSHHost:   sshHost,
 		RemoteTmp: "/tmp/kubolt-backups",
 		DryRun:    dryRun,
 		Stdout:    Stdout,
 		Stderr:    Stderr,
+		Sink:      sink,
 	}
 	return b.BackupApps(selected, dir)
 }
@@ -133,5 +161,5 @@ func runBackupCore(m *manifest.Manifest, appNames []string, dir, sshHost string,
 	if err != nil {
 		return err
 	}
-	return runBackupWithHost(selected, dir, sshHost, dryRun)
+	return runBackupWithHost(selected, dir, sshHost, dryRun, output.NopSink{})
 }

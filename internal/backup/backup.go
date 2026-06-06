@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 )
 
 // execCommand is the package-level seam for testing (mirrors internal/helm pattern).
@@ -34,6 +35,16 @@ type Backuper struct {
 	// nowFn is used to generate the timestamp directory. Defaults to time.Now.
 	// Exposed for deterministic tests.
 	nowFn func() time.Time
+
+	// Sink receives progress events per app. If nil, no events are emitted.
+	Sink output.Sink
+}
+
+// emit forwards an event to the configured Sink, no-op when Sink is nil.
+func (b *Backuper) emit(e output.Event) {
+	if b.Sink != nil {
+		b.Sink.Emit(e)
+	}
 }
 
 // BackupApps backs up all configured targets for the given apps into
@@ -63,6 +74,9 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 			break
 		}
 	}
+
+	b.emit(output.Event{Kind: output.TreeStart, Count: len(apps)})
+	defer b.emit(output.Event{Kind: output.TreeDone})
 
 	// Dry-run: print plans for all targets across all apps.
 	if b.DryRun {
@@ -124,7 +138,10 @@ func (b *Backuper) BackupApps(apps []manifest.App, localDir string) error {
 		if app.Backup == nil {
 			continue
 		}
-		if err := b.backupAppTargets(ctx, app, localTs, remoteTsDir); err != nil {
+		b.emit(output.Event{Kind: output.NodeStart, App: app.Name})
+		err := b.backupAppTargets(ctx, app, localTs, remoteTsDir)
+		b.emit(output.Event{Kind: output.NodeDone, App: app.Name, Err: err})
+		if err != nil {
 			return err
 		}
 	}
@@ -159,6 +176,7 @@ func (b *Backuper) backupAppTargets(ctx context.Context, app manifest.App, local
 
 	replicas := map[string]string{}
 	if scaleDown {
+		b.emit(output.Event{Kind: output.NodeLine, App: app.Name, Stage: "scaling-down"})
 		out, err := b.captureCmd("kubectl", "get", "deploy", "-n", app.Namespace, "-o",
 			"jsonpath={range .items[*]}{.metadata.name}={.spec.replicas} {end}")
 		if err != nil {
@@ -179,6 +197,7 @@ func (b *Backuper) backupAppTargets(ctx context.Context, app manifest.App, local
 			return fmt.Errorf("scale-down timeout for %s: %w", app.Name, err)
 		}
 		defer func() {
+			b.emit(output.Event{Kind: output.NodeLine, App: app.Name, Stage: "scaling-up"})
 			for _, name := range sortedKeys(replicas) {
 				count := replicas[name]
 				_ = b.runCmd("kubectl", "scale", "deploy", name, "-n", app.Namespace, fmt.Sprintf("--replicas=%s", count))
@@ -194,6 +213,7 @@ func (b *Backuper) backupAppTargets(ctx context.Context, app manifest.App, local
 	}
 
 	// Run each target.
+	b.emit(output.Event{Kind: output.NodeLine, App: app.Name, Stage: "copying"})
 	for _, target := range app.Backup.Targets {
 		strat, err := b.resolveStrategy(target.Type)
 		if err != nil {

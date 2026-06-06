@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/guneet-xyz/kubolt/internal/manifest"
+	"github.com/guneet-xyz/kubolt/internal/output"
 )
 
 type stubResponse struct {
@@ -497,5 +498,115 @@ func TestBackup_FilesystemAndPgDump_Mixed(t *testing.T) {
 	}
 	if !pgDumpCalled {
 		t.Errorf("expected pg_dump call\ncalls:\n  %s", strings.Join(calls, "\n  "))
+	}
+}
+
+type sinkRecorder struct {
+	mu     sync.Mutex
+	events []output.Event
+}
+
+func (s *sinkRecorder) Emit(e output.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+}
+
+func (s *sinkRecorder) snapshot() []output.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]output.Event, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+func TestBackupApps_SinkEvents(t *testing.T) {
+	stub := newStub()
+	stub.setOutput("kubectl get pod -n db", "postgres-0 ")
+	stub.setOutput("kubectl exec -n db postgres-0 -- printenv PGDATABASE", "mydb")
+	stub.setOutput(pgDumpExecPrefix("db", "postgres-0"), "DUMPBYTES")
+
+	SetExecCommand(stub.execFn())
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	rec := &sinkRecorder{}
+	b := newBackuper(&stdout, &stderr)
+	b.Sink = rec
+
+	apps := []manifest.App{{
+		Name:      "pg",
+		Namespace: "db",
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{pgTarget("app=postgres")},
+		},
+	}}
+
+	if err := b.BackupApps(apps, t.TempDir()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events := rec.snapshot()
+	wantKinds := []output.EventKind{
+		output.TreeStart,
+		output.NodeStart,
+		output.NodeLine,
+		output.NodeDone,
+		output.TreeDone,
+	}
+	if len(events) != len(wantKinds) {
+		t.Fatalf("expected %d events, got %d: %+v", len(wantKinds), len(events), events)
+	}
+	for i, want := range wantKinds {
+		if events[i].Kind != want {
+			t.Errorf("event[%d] kind: got %s, want %s", i, events[i].Kind, want)
+		}
+	}
+
+	if got := events[0].Count; got != 1 {
+		t.Errorf("TreeStart.Count: got %d, want 1", got)
+	}
+	if got := events[1].App; got != "pg" {
+		t.Errorf("NodeStart.App: got %q, want %q", got, "pg")
+	}
+	if got := events[2].App; got != "pg" {
+		t.Errorf("NodeLine.App: got %q, want %q", got, "pg")
+	}
+	if got := events[2].Stage; got != "copying" {
+		t.Errorf("NodeLine.Stage: got %q, want %q", got, "copying")
+	}
+	if got := events[3].App; got != "pg" {
+		t.Errorf("NodeDone.App: got %q, want %q", got, "pg")
+	}
+	if events[3].Err != nil {
+		t.Errorf("NodeDone.Err: got %v, want nil", events[3].Err)
+	}
+}
+
+func TestBackupApps_SinkNilSafe(t *testing.T) {
+	stub := newStub()
+	stub.setOutput("kubectl get pod -n db", "postgres-0 ")
+	stub.setOutput("kubectl exec -n db postgres-0 -- printenv PGDATABASE", "mydb")
+	stub.setOutput(pgDumpExecPrefix("db", "postgres-0"), "DUMPBYTES")
+
+	SetExecCommand(stub.execFn())
+	defer ResetExecCommand()
+
+	var stdout, stderr bytes.Buffer
+	b := newBackuper(&stdout, &stderr)
+	if b.Sink != nil {
+		t.Fatalf("sink should default to nil")
+	}
+
+	apps := []manifest.App{{
+		Name:      "pg",
+		Namespace: "db",
+		Backup: &manifest.BackupSpec{
+			Targets: []manifest.Target{pgTarget("app=postgres")},
+		},
+	}}
+
+	if err := b.BackupApps(apps, t.TempDir()); err != nil {
+		t.Fatalf("unexpected error with nil sink: %v", err)
 	}
 }
